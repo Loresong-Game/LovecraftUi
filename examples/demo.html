@@ -1,0 +1,1418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Interactive Demo</title>
+<!-- @demo   The full interactive showcase: every widget, window, and system on one scrolling page.
+     @shows  EldWindow, EldPopup, EldDragDrop, EldTooltip, EldEvents, Button, IconButton, TextField, Toggle, Radio, Slider, Select, ProgressBar, EventLog, Table, UnitFrame, Minimap, QuestTracker, CharacterPanel, SettingsPanel, Globe, CastBar, RadialMenu
+     @params ?freeze=1 — bit-stable snapshot boot (no ambiance, pinned clock) · ?assert=1 — the in-page suite titles its own PASS count · ?scroll=N — pre-scroll the page N px · ?spawn=1 — open the spawn-window showcase · ?shrink=1 — shrink the settings window to force both scrollbars · ?spawnchar=1 — open the character panel window · ?gamepad=1 — show the controller hint overlay -->
+
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+// Boot-health protocol: any error surfaces in the title so headless DOM dumps can gate
+// on it (the page manifest lists this page as READY). Hooks must precede the module script.
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import {
+  Eldritch, EldWindow, EldPopup, EldDragDrop, EldTooltip, EldEvents,
+  Button, IconButton, TextField, Toggle, ToggleLabel, Radio, RadioLabel, Slider, Select, ProgressBar,
+  Window, ActionSlot, CpSlot, IconPalette, ActionbarLock,
+  EventLog, Table, UnitFrame, Minimap, QuestTracker, CharacterPanel, SettingsPanel, TalentPanes, Globe, CastBar, FloatText,
+  UINode, QuadNode, NineSliceNode, TextNode, ScrollArea,
+  ABILITY_ICON_IDS, formatIconName, runAudit, hitTest,
+  COLORS, FONTS, METRICS, column, row, grid, clamp, fitChildren, contentExtent, RadialMenu,
+} from '../src/lovecraft-ui.js';
+
+// ?freeze=1 (verification aid): boot without the animated ambiance on a timer-driven
+// clock, and settle to one bit-stable frame below — the -Snap baseline protocol
+const FROZEN = new URLSearchParams(location.search).has('freeze');
+// L12: the ?uiscale= hook — the couch-distance baseline set shoots through it
+const UISCALE = Number(new URLSearchParams(location.search).get('uiscale'));
+const SCALE_OPT = Number.isFinite(UISCALE) && UISCALE > 0 ? { uiScale: UISCALE } : {};
+// ?assert=1: the in-page suite needs real frames under headless dump-dom,
+// where rAF never fires — the same timer-driven clock the freeze protocol uses
+const ASSERT = new URLSearchParams(location.search).has('assert');
+// INSTRUMENTED (the arcade/meters idiom): every census boot reads a RESTING page —
+// ambient clocks park, and navigation is parked with them (the walkers PRESS every
+// actionable control; a mid-walk location change abandons the measurement).
+const INSTRUMENTED = FROZEN || ASSERT
+  || ['audit', 'torture', 'resize'].some((k) => new URLSearchParams(location.search).has(k));
+const NAV_LOCKED = INSTRUMENTED;
+Eldritch.init(FROZEN || ASSERT
+  ? { ...SCALE_OPT, background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { ...SCALE_OPT, contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+
+// ---- the icon pack (optional download): the RE-SKIN idiom ----
+// `as:` points at icon ids this page ALREADY uses, so the registry re-bakes those NAMES
+// in place: every live quad follows with no page code and no atlas movement.
+// `fallback: 'none'` leaves the procedural art standing when assets/ is absent, which is
+// the shipped default - the pack is an optional download and the page must not need it.
+// Skipped under FROZEN: --screenshot captures at the load event and cannot wait for an
+// async decode, so frozen baselines run on the procedural art by necessity.
+const packSkinned = new Set(); // AS-names the pack actually re-skinned (tooltips tell the truth)
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-3649', as: 'book' },
+      { id: 'ico-0210', as: 'shield' },
+      { id: 'ico-0513', as: 'sword' },
+      { id: 'ico-0489', as: 'blindinglight' },
+      { id: 'ico-0707', as: 'arrows' },
+      { id: 'ico-0307', as: 'leafs' },
+      { id: 'ico-0394', as: 'deathkiss' },
+      { id: 'ico-0017', as: 'fireball' },
+      { id: 'ico-0078', as: 'fireball2' },
+    ],
+  }).then((r) => { for (const name of r?.registered ?? []) packSkinned.add(name); });
+}
+
+window.engine = engine;
+window.Eldritch = Eldritch;
+const T = engine.textures;
+
+// ---------- page scaffold ----------
+
+const PAGE_W = 1100;
+const page = new ScrollArea({});
+page.onLayout = function () {
+  this.setRect(0, 0, engine.width, engine.height);
+  ScrollArea.prototype.onLayout.call(this);
+};
+engine.layers.background.add(page);
+
+const pageCol = new UINode({ name: 'pageCol' });
+// the taskbar is viewport chrome and the page column SCROLLS beneath it —
+// whatever section rests in that band at any scroll is legitimately covered
+// (the strategy-hud field precedent: reach allowances are container-scoped, so
+// the column declares it ONCE). Before the window frame fell, the resting fold
+// happened to park only dead padding under the band; the shift ended the luck.
+pageCol.auditAllow('reach');
+page.content.add(pageCol);
+const sections = [];
+pageCol.onLayout = function () {
+  this.x = Math.max(12, Math.round((engine.width - PAGE_W) / 2));
+  this.w = PAGE_W;
+  const h = column(sections, { x: 0, y: 0, gap: 46 });
+  // Frozen shots pin the page height to a constant: a borderline word-wrap BELOW the
+  // fold (sub-pixel text-measure jitter between runs) otherwise moves the page
+  // scrollbar thumb by a pixel — the one nondeterministic tile in the -Snap baseline
+  // . Every content pixel above the fold is unaffected. If the demo ever
+  // outgrows 4096 the -Snap advisory will flicker again — raise the constant then.
+  this.h = FROZEN ? 4096 : h + 120;
+};
+
+// Sections auto-size to their children; the `height` argument is only an initial hint.
+function section(title, height, subtitle = '') {
+  const s = new UINode({ name: 'sec:' + title });
+  const h2 = new TextNode(title, {
+    font: FONTS.header, size: 24, color: COLORS.accent, smallCaps: true, letterSpacing: 2,
+    shadow: { color: 'rgba(0,0,0,0.9)', dx: 1, dy: 2, blur: 4 },
+  });
+  h2.setPos(0, 0);
+  s.add(h2);
+  let sub = null;
+  if (subtitle) {
+    sub = new TextNode(subtitle, { size: 12, color: COLORS.textFaint, multiline: true, maxWidth: PAGE_W - 40 });
+    sub.setPos(2, 32);
+    s.add(sub);
+  }
+  s.setSize(PAGE_W, height);
+  // body starts below the MEASURED subtitle (it may wrap to several lines)
+  s.bodyY = sub ? 32 + sub.h + 12 : 42;
+  s.onLayout = function () {
+    fitChildren(this, { minH: 80 });
+    this.w = PAGE_W;
+  };
+  sections.push(s);
+  pageCol.add(s);
+  return s;
+}
+
+// Cards keep a fixed width but auto-grow their height to wrap the content.
+// Position children absolutely, or set `c.layoutContent = () => ...` for layout-helper flows.
+function card(parent, x, y, w, h, title = '') {
+  const c = new UINode({});
+  const bg = new NineSliceNode(T.frame('panel.dark'));
+  bg.fitExclude = true;
+  c.add(bg);
+  c.setRect(x, y, w, h);
+  let rule = null;
+  if (title) {
+    const t = new TextNode(title, { font: FONTS.header, size: 15, color: COLORS.bone, smallCaps: true, letterSpacing: 1 });
+    t.setPos(14, 10);
+    rule = new QuadNode({ color: 0x39443a, opacity: 0.8 });
+    rule.fitExclude = true;
+    c.add(t, rule);
+    c.bodyY = 44;
+  } else c.bodyY = 12;
+  c.layoutContent = null;
+  c.onLayout = function () {
+    if (this.layoutContent) this.layoutContent();
+    fitChildren(this, { padBottom: 16, minH: 60 });
+    this.w = w;
+    bg.setRect(0, 0, this.w, this.h);
+    if (rule) rule.setRect(14, 34, this.w - 28, 1);
+  };
+  parent.add(c);
+  return c;
+}
+
+function label(parent, text, x, y, opts = {}) {
+  const t = new TextNode(text, { size: opts.size ?? 12, color: opts.color ?? COLORS.textFaint, ...opts });
+  t.setPos(x, y);
+  parent.add(t);
+  return t;
+}
+
+// ---------- header ----------
+
+const headerSec = new UINode({});
+const h1 = new TextNode('LovecraftUI Interactive Demo', {
+  font: FONTS.header, size: 38, color: COLORS.accent, smallCaps: true, letterSpacing: 3,
+  shadow: { color: 'rgba(0,0,0,0.95)', dx: 2, dy: 3, blur: 6 },
+});
+const sub1 = new TextNode('A Lovecraftian WebGL interface library — carved stone, deep water, and things best left sealed.', { size: 13, color: COLORS.textMuted });
+const sub2 = new TextNode('Every texture is generated at runtime. Rendered entirely with three.js. Fully interactive.', { size: 12, color: COLORS.textFaint });
+headerSec.add(h1, sub1, sub2);
+headerSec.onLayout = function () {
+  h1.setPos(Math.round((PAGE_W - h1.w) / 2), 24);
+  sub1.setPos(Math.round((PAGE_W - sub1.w) / 2), 78);
+  sub2.setPos(Math.round((PAGE_W - sub2.w) / 2), 100);
+};
+headerSec.setSize(PAGE_W, 130);
+sections.push(headerSec);
+pageCol.add(headerSec);
+
+// ---------- 1. popup dialogs ----------
+{
+  const s = section('Asking Before You Act', 150, 'Modal confirmations, prompts, and custom button sets. Escape cancels in one press; a second show() queues behind the first.');
+  // 102, the FITTED height, not a round 104: a declared card height above the fold
+  // that differs from what fitChildren computes paints one frame at the declared
+  // size and then shifts everything below it by the delta on the next layout pass
+  // — and --screenshot captures at the load event, landing on EITHER side. This
+  // 2px was the "demo mid-text-settle race" that flaked the frozen shots for releases
+  // (3.06%, 3.908%, 3.583% @2x today — all this cascade).
+  const c = card(s, 0, s.bodyY, 540, 102, 'Sealed Confirmations');
+  // (sweep) EVERY card on this page now declares its FITTED height,
+  // measured from the settled frozen frame — a declared height fitChildren
+  // corrects is a one-frame layout jump racing --screenshot (the law above).
+  const b1 = new Button('Open the Door', {
+    onClick: () => EldPopup.show({
+      title: 'Confirm Action',
+      message: 'The hinges have not turned in three centuries. Are you sure you want to proceed? This cannot be undone.',
+      onOkay: () => EldEvents.log('Popup OK clicked'),
+      onCancel: () => EldEvents.log('Popup Cancel clicked'),
+    }),
+  });
+  const b2 = new Button('Burn the Grimoire', {
+    onClick: () => EldPopup.show({
+      title: 'Destroy Grimoire',
+      message: 'Permanently burn this grimoire and every secret bound within?',
+      onOkay: () => EldEvents.log('Grimoire burned!'),
+      onCancel: () => EldEvents.log('Burning cancelled'),
+    }),
+  });
+  b1.setPos(16, c.bodyY + 4);
+  b2.setPos(16 + b1.w + 14, c.bodyY + 4);
+  c.add(b1, b2);
+}
+
+// ---------- 2. window manager ----------
+// the little parent frame is GONE. Windows are viewport citizens
+// now — they mount on the engine's own windows layer, roam the whole screen,
+// and every one OPENS AT THE CENTRE OF THE CURRENT VIEW (the layer is
+// viewport-fixed, so screen centre is view centre however deep the page is
+// scrolled), cascading a few pixels per additional window so nothing stacks
+// exactly. The card keeps only the spawn row; its height is the re-measured
+// fit of that row (the card law).
+{
+  const s = section('Windows the Player Moves', 158, 'Draggable, resizable, minimizable, anywhere on the screen. Each opens at the centre of your view; the taskbar collects them.');
+  const btnRow = new UINode({});
+  btnRow.setRect(0, s.bodyY, PAGE_W, 90);
+  s.add(btnRow);
+
+  const spawnButtons = [
+    new Button('Open Reliquary', { onClick: () => { createReliquary(); EldEvents.log('Reliquary window opened'); } }),
+    new Button('Open Rituals', { onClick: () => { createRituals(); EldEvents.log('Rituals window opened'); } }),
+    new Button('Open Tasks', { onClick: () => { createTaskGrimoire(); EldEvents.log('Task grimoire opened'); } }),
+    new Button('View Quest', { onClick: () => { openQuestWindow(); EldEvents.log('Quest details opened'); } }),
+    new Button('Investigator', { onClick: () => { openCharacterPanel(); EldEvents.log('Investigator panel opened'); } }),
+    new Button('Configurations', { onClick: () => { openSettingsPanel(); EldEvents.log('Occult configurations opened'); } }),
+    new Button('Forbidden Sciences', { onClick: () => { openForbiddenSciences(); EldEvents.log('Forbidden Sciences opened'); } }),
+  ];
+  window.__demoSciBtn = spawnButtons[6]; // suite + drive handle (block-scoped otherwise)
+  btnRow.add(...spawnButtons);
+  // two lanes of doors: seven measured faces overran the column in one line
+  // (the small-caps serif runs wide — the eyeball caught the seventh clipping
+  // at the viewport edge while every instrument read green)
+  btnRow.onLayout = () => {
+    row(spawnButtons.slice(0, 4), { x: 0, y: 0, gap: 10 });
+    row(spawnButtons.slice(4), { x: 0, y: 50, gap: 10 });
+  };
+}
+
+// Every demo window opens through this door: centre of the current
+// view, measured size respected, a 26/22px cascade per already-open window.
+function openCentered(opts) {
+  const win = EldWindow.create(opts);
+  const k = Math.max(0, EldWindow.windows.length - 1) % 5;
+  win.setPos(
+    Math.round(Math.max(8, (engine.width - win.w) / 2 + k * 26)),
+    Math.round(Math.max(8, (engine.height - win.h) / 2 + k * 22)),
+  );
+  return win;
+}
+
+function createReliquary() {
+  // no width/height: the window MEASURES the content. The old 350x300
+  // literal left ~50px of dead stone under the coin line (the dead-band class);
+  // the layout call runs once at build so the measurement reads true positions.
+  openCentered({
+    title: 'Reliquary',
+    content: (c) => {
+      const slots = [];
+      for (let i = 0; i < 12; i++) {
+        const slot = new CpSlot('rel' + i);
+        slots.push(slot);
+        c.add(slot);
+      }
+      const gold = new TextNode('', { size: 13 });
+      gold.setSegments([{ text: 'Obols: ', color: COLORS.textMuted }, { text: '1,234', color: COLORS.accent }]);
+      c.add(gold);
+      const seat = () => {
+        grid(slots, { x: 8, y: 8, cols: 4, cellW: METRICS.cpSlotSize, cellH: METRICS.cpSlotSize, gap: 6 });
+        gold.setPos(8, 8 + 3 * (METRICS.cpSlotSize + 6) + 10);
+      };
+      seat();
+      c.onLayout = seat;
+    },
+  });
+}
+
+function createRituals() {
+  // no width/height: measured, like the Reliquary — the 380x280 literal
+  // carried ~45px of dead stone below the last toggle
+  openCentered({
+    title: 'Rituals',
+    content: (c) => {
+      const l1 = new TextNode('Chant Volume', { size: 12, color: COLORS.textMuted });
+      const s1 = new Slider({ value: 75, width: 220, onInput: v => EldEvents.log(`Chant volume: ${v}`, 'SLIDER') });
+      const l2 = new TextNode('Organ Volume', { size: 12, color: COLORS.textMuted });
+      const s2 = new Slider({ value: 50, width: 220, onInput: v => EldEvents.log(`Organ volume: ${v}`, 'SLIDER') });
+      const t1 = new ToggleLabel('Enable ritual echoes', { checked: true, onChange: v => EldEvents.log(`Ritual echoes ${v ? 'ON' : 'OFF'}`, 'TOGGLE') });
+      const t2 = new ToggleLabel('Show whispered tooltips', { checked: true, onChange: v => EldEvents.log(`Whispered tooltips ${v ? 'ON' : 'OFF'}`, 'TOGGLE') });
+      c.add(l1, s1, l2, s2, t1, t2);
+      const seat = () => column([l1, s1, l2, s2, t1, t2], { x: 10, y: 8, gap: 10 });
+      seat();
+      c.onLayout = seat;
+    },
+  });
+}
+
+function createTaskGrimoire() {
+  // 208 tall, not 350: three title+line pairs run to ~147 and the header plus
+  // frame insets eat ~60 — the old literal was ~150px of dead stone (the
+  // dead-band class). Width stays law: the prose wraps to the LIVE box below,
+  // so this window cannot self-measure (the sizing-cycle rule).
+  openCentered({
+    title: 'Quests', width: 400, height: 208,
+    content: (c, win) => {
+      const blocks = [];
+      const proseLines = [];
+      const mk = (title, line, color) => {
+        const t = new TextNode(title, { size: 13, weight: 'bold', color: COLORS.accent });
+        const d = new TextNode(line, { size: 12, color, multiline: true, maxWidth: 320 });
+        blocks.push(t, d);
+        proseLines.push(d);
+        c.add(t, d);
+      };
+      mk('The Lost Idol', 'Progress: 2/5 fragments recovered from the tide pools', COLORS.positive);
+      mk("Dagon's Bane", 'Status: Not started', COLORS.negative);
+      mk("The Merchant's Debt", 'Reward: 500 Obols', COLORS.textMuted);
+      // the prose tracks the LIVE content box: resize the grimoire and the
+      // lines re-wrap — never a static width ignoring the parent
+      c.onLayout = () => {
+        const wrapW = Math.max(140, win.contentArea.boxW - 20);
+        for (const d of proseLines) d.setMaxWidth(wrapW);
+        column(blocks, { x: 10, y: 8, gap: 8 });
+      };
+    },
+  });
+}
+
+function openQuestWindow() {
+  // 360 tall, not 420: the accept/decline row bottoms near ~300 under the
+  // re-wrapped description and the chrome eats ~60 — the rest was dead stone.
+  // Width stays law (the description wraps to the live box; cycle rule).
+  const win = openCentered({
+    title: 'Quest Details', width: 430, height: 360,
+    content: (c) => {
+      const iconQ = new QuadNode({ texture: T.get('mark.exclaim') });
+      iconQ.setRect(10, 10, 26, 26);
+      const title = new TextNode('The Lost Idol', { font: FONTS.header, size: 17, color: COLORS.accent, smallCaps: true });
+      title.setPos(46, 12);
+      const desc = new TextNode(
+        'An idol of green soapstone was scattered into five fragments when the reef swallowed the chapel. Gather what the tide surrenders, and speak nothing of the carvings to the villagers — they remember too much already.',
+        { size: 12, color: COLORS.textMuted, multiline: true, maxWidth: 340 });
+      desc.setPos(12, 48);
+      c.add(iconQ, title, desc);
+
+      const obj1 = new TextNode('0/5  Collect idol fragments', { size: 12, color: COLORS.negative, multiline: true, maxWidth: 340 });
+      const obj2 = new TextNode('0/1  Return to the Elder', { size: 12, color: COLORS.negative, multiline: true, maxWidth: 340 });
+      obj1.setPos(12, desc.y + desc.h + 14);
+      obj2.setPos(12, desc.y + desc.h + 32);
+      c.add(obj1, obj2);
+
+      const rl = new TextNode('Rewards', { size: 12, color: COLORS.textFaint });
+      rl.setPos(12, obj2.y + 30);
+      c.add(rl);
+      const rewards = [
+        { icon: 'currency.gold', qty: '500', spec: { title: '500 Obols', titleColor: COLORS.rarityCommon, desc: 'Currency of the drowned market.' } },
+        { icon: 'icon.sword', spec: { title: 'Blade of the Vigil', titleColor: COLORS.rarityRare, desc: 'A blade quenched in ancient fires.', stats: ['+25 Attack Power'] } },
+        { icon: 'icon.shield', spec: { title: 'Aegis of the Sleeper', titleColor: COLORS.rarityRare, desc: 'It has outlasted every bearer.', stats: ['+50 Armor'] } },
+      ];
+      const slots = [];
+      rewards.forEach((r, i) => {
+        const slot = new UINode({ interactive: true });
+        const bg = new QuadNode({ texture: T.get('slot.frame') });
+        const ic = new QuadNode({ texture: T.get(r.icon) });
+        slot.add(bg, ic);
+        slot.setRect(12 + i * 48, rl.y + 20, 40, 40);
+        bg.setRect(0, 0, 40, 40);
+        ic.setRect(5, 5, 30, 30);
+        if (r.qty) {
+          const q = new TextNode(r.qty, { size: 10, color: COLORS.textWhite, shadow: { color: '#000', dx: 1, dy: 1, blur: 1 } });
+          q.setPos(38 - q.w, 28);
+          slot.add(q);
+        }
+        EldTooltip.attach(slot, r.spec);
+        slots.push(slot);
+        c.add(slot);
+      });
+
+      const accept = new Button('Accept', { onClick: () => { EldEvents.log('Quest accepted!'); win.close(); } });
+      const decline = new Button('Decline', { onClick: () => { EldEvents.log('Quest declined'); win.close(); } });
+      accept.setPos(12, rl.y + 76);
+      decline.setPos(12 + accept.w + 12, rl.y + 76);
+      c.add(accept, decline);
+
+      // the prose tracks the LIVE content box: the description re-wraps on
+      // resize and everything below it re-seats by the wrapped heights
+      c.onLayout = () => {
+        const wrapW = Math.max(160, win.contentArea.boxW - 24);
+        desc.setMaxWidth(wrapW);
+        obj1.setMaxWidth(wrapW - 10);
+        obj2.setMaxWidth(wrapW - 10);
+        obj1.setPos(12, desc.y + desc.h + 14);
+        obj2.setPos(12, obj1.y + obj1.h + 6);
+        rl.setPos(12, obj2.y + obj2.h + 12);
+        slots.forEach((s, i) => s.setPos(12 + i * 48, rl.y + 20));
+        accept.setPos(12, rl.y + 76);
+        decline.setPos(12 + accept.w + 12, rl.y + 76);
+      };
+    },
+  });
+  return win;
+}
+
+function openCharacterPanel() {
+  // no width/height: the window MEASURES the panel. The old 540x580 literal
+  // was hand-fitted to the panel's earlier declared 470x500 — a third of it
+  // empty stone below the stats box, and any shrink armed a scrollbar over
+  // nothing (the dead-band dialog class; the panel declares its painted 440x334 now)
+  openCentered({
+    title: 'Investigator',
+    content: (c) => {
+      const panel = new CharacterPanel({
+        categories: [
+          { name: 'Attributes', rows: [['Strength', 45], ['Agility', 32], ['Intellect', 28], ['Willpower', 41]] },
+          { name: 'Defense', rows: [['Armor', 2450], ['Ward', '25%'], ['Dodge', '12%'], ['Resolve', '8%']] },
+          { name: 'Offense', rows: [['Attack Power', 890], ['Critical', '18%'], ['Haste', '10%'], ['Precision', '5%']] },
+        ],
+        currency: { gold: '1,234', silver: 56, copper: 78 },
+        inventoryLabel: 'Satchel',
+      });
+      panel.setPos(6, 6);
+      c.add(panel);
+      panel.equip('head', 'shield');
+      panel.equip('chest', 'book');
+      for (const [slot, icon] of [['inv0', 'fireball'], ['inv1', 'arrows'], ['inv3', 'deathkiss'], ['inv5', 'leafs'], ['inv8', 'blindinglight']]) {
+        panel.equip(slot, icon);
+      }
+    },
+  });
+}
+
+function openSettingsPanel() {
+  openCentered({
+    title: 'Settings', width: 580, height: 440,
+    minWidth: 426, minHeight: 300, // the panel's 380x240 minimums + chrome: resizing can never double the bars
+    content: (c) => {
+      const mkRow = (parent, labelText, control, y) => {
+        const l = new TextNode(labelText, { size: 12, color: COLORS.textMuted });
+        l.setPos(0, y + 6);
+        control.setPos(96, y);
+        parent.add(l, control);
+        return y + Math.max(30, control.h + 8);
+      };
+      const panel = new SettingsPanel({
+        width: 530, height: 360,
+        tabs: [
+          {
+            id: 'sound', label: 'Sound', icon: 'tune',
+            build: (p) => {
+              let y = 4;
+              y = mkRow(p, 'Master', new Slider({ value: 80, width: 200 }), y);
+              y = mkRow(p, 'Chants', new Slider({ value: 60, width: 200 }), y);
+              y = mkRow(p, 'Effects', new Slider({ value: 100, width: 200 }), y);
+              const t1 = new ToggleLabel('Ambient abyssal drone', { checked: true });
+              const t2 = new ToggleLabel('Voices of the choir');
+              t1.setPos(0, y + 6); t2.setPos(0, y + 38);
+              p.add(t1, t2);
+            },
+          },
+          {
+            id: 'graphics', label: 'Graphics', icon: 'cogwheel',
+            build: (p) => {
+              let y = 4;
+              y = mkRow(p, 'Quality', new Slider({ min: 0, max: 4, step: 1, value: 2, width: 220, labels: ['DIM', 'LOW', 'MID', 'HIGH', 'MAX'] }), y) + 12;
+              y = mkRow(p, 'Resolution', new Select({ options: ['1920x1080', '2560x1440', '3840x2160'], width: 170 }), y);
+              const t1 = new ToggleLabel('Cast long shadows', { checked: true });
+              const t2 = new ToggleLabel('Soften the veil (AA)', { checked: true });
+              const t3 = new ToggleLabel('Vertical sync');
+              t1.setPos(0, y + 6); t2.setPos(0, y + 38); t3.setPos(0, y + 70);
+              p.add(t1, t2, t3);
+            },
+          },
+          {
+            id: 'controls', label: 'Controls', icon: 'rows',
+            build: (p) => {
+              let y = 4;
+              y = mkRow(p, 'Sensitivity', new Slider({ value: 50, width: 200 }), y);
+              const t1 = new ToggleLabel('Invert the y-axis', { checked: true });
+              const t2 = new ToggleLabel('Toggle to run');
+              t1.setPos(0, y + 6); t2.setPos(0, y + 38);
+              const rl = new TextNode('Movement', { size: 12, color: COLORS.textMuted });
+              rl.setPos(0, y + 76);
+              const r1 = new RadioLabel('movement', 'WASD', { checked: true, onChange: () => EldEvents.log('Movement: WASD', 'UI') });
+              const r2 = new RadioLabel('movement', 'Arrow Keys', { onChange: () => EldEvents.log('Movement: Arrow Keys', 'UI') });
+              r1.setPos(96, y + 72); r2.setPos(200, y + 72);
+              p.add(t1, t2, rl, r1, r2);
+            },
+          },
+          {
+            id: 'addons', label: 'Addons', icon: 'puzzle',
+            build: (p) => {
+              const opts = [
+                ['Suffering Meters', true], ['Quest Whisperer', true], ['Satchel Sorter', false], ['Cartographer\'s Dread', true],
+              ];
+              opts.forEach(([name, on], i) => {
+                const t = new ToggleLabel(name, { checked: on, onChange: v => EldEvents.log(`${name} ${v ? 'enabled' : 'disabled'}`, 'TOGGLE') });
+                t.setPos(0, 6 + i * 32);
+                p.add(t);
+              });
+            },
+          },
+        ],
+      });
+      c.add(panel);
+      // exact fill of the window's content box (which is a pure function of the window size);
+      // when the window shrinks below the panel minimums, the content box scrolls instead
+      c.onLayout = () => panel.setRect(0, 0, Math.max(380, c.w), Math.max(240, c.h));
+    },
+  });
+}
+
+function openForbiddenSciences() {
+  // The sciences from the war table, copied whole: ten talents over three chains
+  // on a fifteen-point pool. No width/height — the window MEASURES the pane —
+  // and the grid consumes right-clicks (unlearn), so no wheel opens over a plate.
+  openCentered({
+    id: 'sciences', title: 'Forbidden Sciences',
+    content: (c) => {
+      const tp = new TalentPanes({
+        points: 15,
+        panes: [{ id: 'sciences', data: { name: 'Sciences', talents: [
+          { id: 'tithe', icon: 'book', tier: 1, col: 0, maxRank: 2 },
+          { id: 'bells', icon: 'blindinglight', tier: 1, col: 1, maxRank: 3 },
+          { id: 'lens', icon: 'blindinglight', tier: 1, col: 2, maxRank: 2 },
+          { id: 'ledger', icon: 'book', tier: 2, col: 0, maxRank: 2, requires: 'tithe' },
+          { id: 'brine', icon: 'leafs', tier: 2, col: 1, maxRank: 3, requires: 'bells' },
+          { id: 'salt', icon: 'shield', tier: 2, col: 2, maxRank: 2 },
+          { id: 'hymn', icon: 'book', tier: 3, col: 0, maxRank: 2, requires: 'ledger' },
+          { id: 'graves', icon: 'deathkiss', tier: 3, col: 1, maxRank: 1, requires: 'brine' },
+          { id: 'wards', icon: 'shield', tier: 3, col: 2, maxRank: 3, requires: 'salt' },
+          { id: 'abyss', icon: 'fireball', tier: 4, col: 1, maxRank: 1, requires: 'graves' },
+        ] } }],
+        onSpend: (e) => {
+          EldEvents.log(`Learned: ${e.id}, rank ${e.rank}`, 'TALENT');
+          if (tp.pane('sciences').getState(e.id) === 'maxed') EldEvents.log(`Science mastered: ${e.id}`, 'TALENT');
+        },
+      });
+      window.__demoSci = tp; // suite handle (block-scoped otherwise)
+      c.add(tp);
+    },
+  });
+}
+
+// ---------- 3. drag & drop ----------
+{
+  const s = section('The Action Bar', 400, 'Drag rites between slots and the palette. The lock pins them; the same public path a hotkey or gamepad-A takes fires them.');
+  const c1 = card(s, 0, s.bodyY, 540, 130, 'Reliquary of Icons (infinite source)');
+  const palette = new IconPalette(ABILITY_ICON_IDS, { perRow: 9 });
+  palette.setPos(14, c1.bodyY);
+  c1.add(palette);
+
+  const c2 = card(s, 0, c1.y + c1.h + 16, 540, 172, 'Action Bar');
+  const slotRow = new UINode({ name: 'actionBar' });
+  const slots = [];
+  for (let i = 0; i < 12; i++) {
+    const slot = new ActionSlot(i);
+    slots.push(slot);
+    slotRow.add(slot);
+  }
+  slotRow.onLayout = () => grid(slots, { x: 0, y: 0, cols: 6, cellW: METRICS.slotSize, cellH: METRICS.slotSize, gap: 0 });
+  slotRow.setRect(14, c2.bodyY, 6 * METRICS.slotSize, 2 * METRICS.slotSize);
+  const lock = new ActionbarLock();
+  lock.setPos(14 + 6 * METRICS.slotSize + 10, c2.bodyY + Math.round((2 * METRICS.slotSize - lock.h) / 2));
+  EldDragDrop.registerLock(lock);
+  c2.add(slotRow, lock);
+  slotRow.on('slotchange', (e) => EldEvents.log(`Slot ${e.slot}: ${e.action} "${e.icon}"`, 'SLOT'));
+  slotRow.on('action-triggered', () => {});
+  // radial-chain demonstration: the BAR is the provider. A right-click on
+  // a FILLED slot offers that slot's verbs through the chain; an EMPTY slot
+  // DECLINES (null), so the same gesture falls through to the page's ground
+  // wheel — the fallback law, demonstrated on the hotbar named above.
+  slotRow.radialItems = (e) => {
+    const slot = e.target?.closest?.((n) => n instanceof ActionSlot);
+    if (!slot || !EldDragDrop.getSlotIcon(slot)) return null;
+    return [
+      { id: 'invoke', label: 'Invoke', onSelect: () => EldDragDrop.triggerAction(slot) },
+      {
+        id: 'clear', label: 'Clear',
+        disabled: EldDragDrop.locked === true,
+        reason: EldDragDrop.locked === true ? 'The bar is pinned.' : undefined,
+        onSelect: () => EldDragDrop.clearSlot(slot),
+      },
+    ];
+  };
+  window.__demoBar = { slotRow, slots }; // suite + drive handles (block-scoped otherwise)
+}
+
+// ---------- 4. event handling ----------
+{
+  const s = section('Telling the Player What Happened', 320, 'The event log, corner toasts, and the notification routing that decides which of them a message deserves.');
+  const c1 = card(s, 0, s.bodyY, 420, 274, 'Interactive Controls');
+  let y = c1.bodyY;
+  const tf = new TextField({ placeholder: 'Inscribe a name...', width: 240 });
+  tf.on('input', (e) => EldEvents.log(`Text input: "${e.value}"`, 'INPUT'));
+  tf.setPos(16, y); y += 44;
+  const volLabel = new TextNode('', { size: 12, color: COLORS.textFaint });
+  const setVol = v => volLabel.setSegments([{ text: 'Volume: ', color: COLORS.textFaint }, { text: v + '%', color: COLORS.accent }]);
+  setVol(50);
+  volLabel.setPos(16, y); y += 18;
+  const sl = new Slider({ value: 50, width: 240, onInput: (v) => { setVol(v); EldEvents.log(`Volume: ${v}%`, 'SLIDER'); } });
+  sl.setPos(16, y); y += 34;
+  const tg = new ToggleLabel('Heed the notifications', { onChange: v => EldEvents.log(`Notifications ${v ? 'ON' : 'OFF'}`, 'TOGGLE') });
+  tg.setPos(16, y); y += 34;
+  const sel = new Select({ options: [
+    { value: 'cultist', label: 'Cultist' }, { value: 'scholar', label: 'Scholar' },
+    { value: 'priest', label: 'Priest of Dagon' }, { value: 'hybrid', label: 'Deep Hybrid' },
+  ], width: 240, onChange: (v, l) => EldEvents.log(`Calling selected: ${l}`, 'SELECT') });
+  sel.setPos(16, y); y += 46;
+  const db = new Button('Ring the Bell', { onClick: () => EldEvents.log('The bell tolls once.', 'CLICK') });
+  db.setPos(16, y);
+  c1.add(tf, volLabel, sl, tg, sel, db);
+
+  const c2 = card(s, 440, s.bodyY, 660, 268, 'Event Ledger');
+  const log = new EventLog({ width: 630, height: 208 });
+  log.setPos(14, c2.bodyY);
+  c2.add(log);
+  EldEvents.register(log);
+  if (!FROZEN) EldEvents.log('Event ledger initialized. Interact with the instruments to see records.', 'SYSTEM');
+}
+
+// ---------- 5. icon gallery ----------
+{
+  const s = section('The Icon Vocabulary', 330, 'Every glyph has a procedural painter — no image files are required — and the optional painted pack re-skins the same ids in place. The Icon Vault holds all 3,840.');
+  const c1 = card(s, 0, s.bodyY, 540, 120, 'Rites & Invocations');
+  ABILITY_ICON_IDS.forEach((id, i) => {
+    const q = new QuadNode({ texture: T.get(`icon.${id}`), interactive: true });
+    q.setRect(16 + i * 56, c1.bodyY + 2, 40, 40);
+    // the tooltip reads the LIVE art: pack decode is async, so the spec is a
+    // function — a claim baked at build time called painted art "procedural"
+    EldTooltip.attach(q, () => ({
+      title: formatIconName(id),
+      desc: packSkinned.has(id) ? 'Painted pack art, re-skinned in place.' : 'A procedurally-drawn glyph.',
+    }));
+    c1.add(q);
+    const cap = label(c1, id.length > 8 ? id.slice(0, 7) + '…' : id, 0, 0, { size: 10 });
+    cap.setPos(16 + i * 56 + Math.round((40 - cap.w) / 2), c1.bodyY + 46);
+  });
+  const vault = new Button('Open the Icon Vault', {
+    onClick: () => { if (!NAV_LOCKED) location.href = 'icon-browser.html'; },
+  });
+  vault.setPos(560, s.bodyY + 8);
+  s.add(vault);
+  label(s, 'The full searchable pack — 3,840 painted icons on 60 sheets.', 560, s.bodyY + 46, { size: 11 });
+  const c2 = card(s, 0, s.bodyY + 142, 540, 94, 'Instruments of the Order');
+  const kinds = ['cogwheel', 'cogwheel.active', 'cogwheel.grayscale', 'puzzle', 'puzzle.active', 'rows', 'rows.active', 'save', 'save.active', 'tune', 'tune.active'];
+  kinds.forEach((k, i) => {
+    const q = new QuadNode({ texture: T.get(`ui.${k}`) });
+    q.setRect(16 + i * 46, c2.bodyY + 4, 30, 30);
+    c2.add(q);
+  });
+  const c3 = card(s, 560, s.bodyY + 142, 300, 112, 'Coin of the Drowned Market');
+  ['gold', 'silver', 'copper'].forEach((k, i) => {
+    const q = new QuadNode({ texture: T.get(`currency.${k}`) });
+    q.setRect(20 + i * 60, c3.bodyY + 8, 24, 24);
+    const cap = label(c3, k, 0, 0, { size: 10 });
+    cap.setPos(20 + i * 60 + Math.round((24 - cap.w) / 2), c3.bodyY + 38);
+    c3.add(q);
+  });
+}
+
+// ---------- 6. form elements ----------
+{
+  const s = section('Taking Input', 250, 'Fields, toggles, radios, sliders and selects — every one speaking the same value contract: .value, setValue(v, {silent}), input and change.');
+  const c1 = card(s, 0, s.bodyY, 260, 146, 'Text Inscription');
+  // the uniform contract in action: a length cap enforced at the source, Enter -> submit
+  const f1 = new TextField({
+    placeholder: 'Investigator name...', width: 220, maxLength: 24,
+    onSubmit: (v) => EldEvents.log(`Name inscribed: "${v}"`, 'INPUT'),
+  });
+  f1.on('change', (e) => EldEvents.log(`Name committed: "${e.value}"`, 'INPUT'));
+  const f2 = new TextField({ value: 'Randolph Carter', width: 220 });
+  f1.setPos(16, c1.bodyY + 4); f2.setPos(16, c1.bodyY + 52);
+  c1.add(f1, f2);
+
+  const c2 = card(s, 276, s.bodyY, 260, 160, 'Bindings');
+  const tgs = [
+    new ToggleLabel('Hear the sea-sounds', { checked: true }),
+    new ToggleLabel('Reveal the map'),
+    new ToggleLabel('Gather relics unbidden', { checked: true }),
+  ];
+  c2.add(...tgs);
+  c2.layoutContent = () => column(tgs, { x: 16, y: c2.bodyY + 4, gap: 12 });
+
+  const c3 = card(s, 552, s.bodyY, 260, 158, 'Measures');
+  const m1l = label(c3, 'Lantern Oil', 16, c3.bodyY);
+  const m1 = new Slider({ value: 75, width: 220 });
+  m1.setPos(16, c3.bodyY + 18);
+  const m2l = label(c3, 'Dread', 16, c3.bodyY + 56);
+  const m2 = new Slider({ value: 50, width: 220 });
+  m2.setPos(16, c3.bodyY + 74);
+  c3.add(m1, m2);
+  void m1l; void m2l;
+
+  const c4 = card(s, 828, s.bodyY, 272, 98, 'Callings');
+  const sel = new Select({ options: ['Cultist', 'Scholar', 'Priest of Dagon', 'Deep Hybrid'], width: 230 });
+  sel.setPos(16, c4.bodyY + 4);
+  c4.add(sel);
+}
+
+// ---------- 7. static window ----------
+{
+  // section hint 272, not 330: the measured window is ~212 tall now (5 rows,
+  // no dead band) and the hint tracks the fitted height
+  const s = section('Panels That Stay Put', 272, 'The static Window: chrome that never moves, for the parts of a HUD the player should not be able to drag away.');
+  // no width/height: measured — the 350x260 literal kept ~55px of dead
+  // stone under the last stat row
+  const win = new Window({
+    title: 'Investigator Stats',
+    content: (c) => {
+      const rows = [];
+      for (const [k, v] of [['Strength', 45], ['Agility', 32], ['Intellect', 28], ['Stamina', 41], ['Spirit', 19]]) {
+        const line = new UINode({});
+        const lab = new TextNode(k, { size: 13, color: COLORS.textFaint });
+        const val = new TextNode(String(v), { size: 13, weight: 'bold', color: COLORS.accent });
+        const rule = new QuadNode({ color: 0x6fd18b, opacity: 0.12 });
+        line.add(lab, val, rule);
+        line.setSize(280, 26);
+        lab.setPos(0, 3);
+        val.setPos(280 - val.w, 3);
+        rule.setRect(0, 24, 280, 1);
+        rows.push(line);
+        c.add(line);
+      }
+      const seat = () => column(rows, { x: 8, y: 6, gap: 4 });
+      seat();
+      c.onLayout = seat;
+    },
+  });
+  win.setPos(0, s.bodyY);
+  s.add(win);
+}
+
+// ---------- 8. buttons ----------
+{
+  const s = section('Buttons, and Their Four States', 120, 'Rest, hover, press, disabled. Every clickable in the library owes you all four.');
+  const c = card(s, 0, s.bodyY, 640, 72);
+  const btns = [
+    new Button('Normal'),
+    new Button('Hover Me'),
+    new Button('Click Me', { onClick: () => EldEvents.log('Stone button pressed', 'CLICK') }),
+    new Button('Sealed Away', { disabled: true }),
+  ];
+  c.add(...btns);
+  c.layoutContent = () => row(btns, { x: 16, y: 18, gap: 14 });
+}
+
+// ---------- 9. progress bars ----------
+{
+  const s = section('Showing Progress', 190, 'Continuous and segmented. Values tween on the house 0.3s; assigning one directly is a defect, not a shortcut.');
+  const c = card(s, 0, s.bodyY, 540, 168, 'Summoning Progress');
+  const lbl1 = new TextNode('', { size: 12, color: COLORS.textFaint });
+  const bar1 = new ProgressBar({ value: 75, width: 320 });
+  const lbl2 = new TextNode('Transcribing... 45%', { size: 12, color: COLORS.textFaint });
+  const bar2 = new ProgressBar({ value: 45, width: 320 });
+  lbl1.setPos(16, c.bodyY); bar1.setPos(16, c.bodyY + 18);
+  lbl2.setPos(16, c.bodyY + 58); bar2.setPos(16, c.bodyY + 76);
+  c.add(lbl1, bar1, lbl2, bar2);
+  // ping-pong ±0.5% every 50ms from 75 (mirrors the source demo) — LIVE boots only.
+  // The FROZEN settle below only halts the TICKER; a raw setInterval outlives it and
+  // breaches the bit-stable-frame contract (it held only because rendering stopped).
+  // The instrument protocol parks it under the FULL flag set — it used to park only
+  // for FROZEN/ASSERT and ran 20×/second through every ?audit/?torture/?resize
+  // census. The suite's freeze probe reads the bar to prove the park.
+  let v = 75, dir = 1;
+  const setL = () => lbl1.setSegments([{ text: 'Awakening the Sleeper... ', color: COLORS.textFaint }, { text: Math.round(v) + '%', color: COLORS.accent }]);
+  setL();
+  if (!INSTRUMENTED) {
+    setInterval(() => {
+      v += 0.5 * dir;
+      if (v >= 100) { v = 100; dir = -1; }
+      if (v <= 0) { v = 0; dir = 1; }
+      bar1.setValue(v, { animate: false });
+      setL();
+    }, 50);
+  }
+  window.demoBar1 = bar1; // the suite's freeze-means-freeze probe reads it
+}
+
+// ---------- 10. static tooltip ----------
+{
+  const s = section('Lore on Hover', 290, 'Cursor-following, edge-flipping, markup-capable. Attach one to any node and it detaches itself when the node dies.');
+  const tipW = 300;
+  const tip = new UINode({});
+  const bg = new NineSliceNode(T.frame('tooltip.frame'));
+  tip.add(bg);
+  const lines = [
+    new TextNode('Blade of the Void Kings', { font: FONTS.header, size: 15, weight: 'bold', color: COLORS.rarityEpic, shadow: { color: '#000', dx: 1, dy: 1, blur: 2 } }),
+    new TextNode('Epic Two-Handed Blade', { size: 12, color: COLORS.textBright }),
+    new TextNode('156 - 234 Void Damage', { size: 12, color: COLORS.textBright }),
+    new TextNode('Speed 3.60', { size: 12, color: COLORS.textBright }),
+    new TextNode('+45 Strength', { size: 12, color: COLORS.positive }),
+    new TextNode('+32 Stamina', { size: 12, color: COLORS.positive }),
+    new TextNode('+28 Critical Strike', { size: 12, color: COLORS.positive }),
+    new TextNode('"Forged in the fires beneath the sleeping city."', { size: 12, styleIt: 'italic', color: COLORS.bone, multiline: true, maxWidth: tipW - 28 }),
+  ];
+  tip.add(...lines);
+  tip.onLayout = () => {
+    const h = column(lines, { x: 14, y: 12, gap: 5 });
+    tip.setSize(tipW, h + 24);
+    bg.setRect(0, 0, tipW, h + 24);
+  };
+  tip.setPos(0, s.bodyY);
+  s.add(tip);
+}
+
+// ---------- 11. table ----------
+{
+  const s = section('Tables That Sort', 260, 'Boots already ordered (sort: {column, ascending} — silent, construction is not an interaction); click a header to re-order, and the active sort re-applies after every row change. Pass virtual: true and five thousand rows cost one screenful.');
+  const table = new Table({
+    columns: [
+      { label: 'Name', width: 300 },
+      { label: 'Calling', width: 260 },
+      { label: 'Level', width: 160 },
+      { label: 'Role', width: 240 },
+    ],
+    rows: [
+      ['Randolph Carter', 'Dreamer', 60, 'Seeker'],
+      ['Herbert West', 'Reanimator', 60, 'Flesh-Shaper'],
+      ['Lavinia Whateley', 'Cultist', 58, 'Vessel'],
+      ['Obed Marsh', 'Priest of Dagon', 60, 'Deep Hybrid'],
+    ],
+    sort: { column: 0, ascending: false }, // Name, descending — the boot order
+  });
+  table.setPos(0, s.bodyY);
+  s.add(table);
+  window.demoTable = table; // the suite reads the boot sort
+}
+
+// ---------- 12. library info ----------
+{
+  const s = section('About the Library', 260);
+  const c1 = card(s, 0, s.bodyY, 420, 196, 'Contents of the Vault');
+  const stats = [
+    ['Generated textures', String(T.count)],
+    ['Image files shipped', '0'],
+    ['Behavior systems', '8'],
+    ['Widgets', '25+'],
+    ['Renderer', 'three.js (WebGL2)'],
+  ];
+  const rows = stats.map(([k, v]) => {
+    const line = new UINode({});
+    const lab = new TextNode(k, { size: 12, color: COLORS.textFaint });
+    const val = new TextNode(v, { size: 12, weight: 'bold', color: COLORS.accent });
+    const rule = new QuadNode({ color: 0x6fd18b, opacity: 0.12 });
+    line.add(lab, val, rule);
+    line.setSize(380, 24);
+    lab.setPos(0, 2);
+    val.setPos(380 - val.w, 2);
+    rule.setRect(0, 22, 380, 1);
+    c1.add(line);
+    return line;
+  });
+  c1.layoutContent = () => column(rows, { x: 16, y: c1.bodyY, gap: 4 });
+
+  const c2 = card(s, 440, s.bodyY, 660, 133, 'Theme of the Deep');
+  const p = new TextNode(
+    'LovecraftUI renders an entire game interface inside a single WebGL canvas. The stonework, icons, portraits, and maps are painted procedurally at load with a seeded generator — identical on every visit, yet no asset files exist. Windows, drag-and-drop, tooltips, dropdowns, tables, and text input behave as their DOM counterparts did, plus a few things only a 3D renderer can offer, like orbs with real liquid inside.',
+    { size: 12, color: COLORS.textMuted, multiline: true, maxWidth: 620, lineHeight: 19 });
+  p.setPos(16, c2.bodyY);
+  c2.add(p);
+}
+
+// ---------- 13. icon buttons ----------
+{
+  const s = section('Icon-Only Controls', 120, 'Any icon id works. Icon-only means tooltip-required — a glyph without a name is a guess.');
+  const c = card(s, 0, s.bodyY, 420, 68);
+  const kinds = [['cogwheel', 'Settings', 'Open the configurations'], ['puzzle', 'Addons', 'Manage bound addons'], ['rows', 'Menu', 'Open the main menu'], ['save', 'Save', 'Commit progress to the ledger'], ['tune', 'Audio', 'Adjust the drones']];
+  const btns = kinds.map(([k, name, desc]) => {
+    const b = new IconButton(k, { onClick: () => EldEvents.log(`${name} invoked`, 'CLICK') });
+    EldTooltip.attach(b, { title: name, desc });
+    return b;
+  });
+  const dis = new IconButton('cogwheel', { disabled: true });
+  EldTooltip.attach(dis, { title: 'Sealed', desc: 'This instrument does not answer.' });
+  btns.push(dis);
+  c.add(...btns);
+  c.layoutContent = () => row(btns, { x: 20, y: 20, gap: 18 });
+}
+
+// ---------- 14. unit frames ----------
+let playerFrame, targetFrame;
+{
+  const s = section('Vitals and Effects', 260, 'Portrait, level, health and mana, and a buff strip you can place on its own.');
+  playerFrame = new UnitFrame({
+    name: 'Randolph Carter', portrait: 'portrait.player', level: 55,
+    health: [255, 255], mana: [100, 100],
+  });
+  playerFrame.addEffect({ icon: 'shield', name: 'Elder Ward', desc: 'Absorbs 500 damage', duration: '8s remaining', buff: true });
+  playerFrame.addEffect({ icon: 'leafs', name: 'Grave Moss', desc: 'Heals 20 HP per second', duration: '5s remaining', buff: true });
+  playerFrame.setPos(0, s.bodyY);
+
+  targetFrame = new UnitFrame({
+    // 'Star-Spawn of Cthulhu' ellipsized to 'Star-Spawn of C…' on the plate —
+    // the STYLE 1a.1 truncation class; the name fits now (the game-hud 1.0 call)
+    name: 'Star-Spawn', portrait: 'portrait.target', nameColor: COLORS.negative, level: 62,
+    health: [4500, 10000], mana: [500, 500],
+  });
+  targetFrame.addEffect({ icon: 'fireball', name: 'Balefire Burn', desc: 'Taking 15 witch-fire damage per second', duration: '3s remaining', buff: false });
+  targetFrame.addEffect({ icon: 'deathkiss', name: "Death's Kiss", desc: 'Life is being drained', duration: '4s remaining', buff: false });
+  targetFrame.setPos(280, s.bodyY);
+  s.add(playerFrame, targetFrame);
+
+  // THE LIVING SKIRMISH (the flagship's combat — real damage,
+ // bar animation — read better than this catalogue's). The old "Simulate Combat"
+  // button was the exact test-fixture-in-a-costume STYLE §1a.2 removed everywhere
+  // else; the fight runs ON ITS OWN now, the game-hud way: strikes land as tweened
+  // bars WITH damage floaters over the frames, wards answer, the brood quest ticks,
+  // a summoning is cut mid-syllable, and the fallen Star-Spawn rises again. Parked
+  // under INSTRUMENTED like every page clock (a census reads a resting page).
+  const floats = new FloatText({ pool: 12 });
+  floats.onLayout = function () { this.setRect(0, 0, engine.width, engine.height); };
+  engine.layers.background.add(floats); // after `page`: floaters fly OVER the scrolling column
+  let skirmishAcc = 0, strikes = 0, slain = 0, broodDone = false;
+  function skirmishTick(dt) {
+    skirmishAcc += dt;
+    if (skirmishAcc < 1.1) return;
+    skirmishAcc = 0;
+    if (targetFrame.health.cur <= 0) return; // the slumber clock below holds the field
+    strikes++;
+    // the rite lands on the Star-Spawn — crits pop bigger and linger
+    const crit = Math.random() < 0.22;
+    const dmg = crit ? 380 + Math.floor(Math.random() * 220) : 120 + Math.floor(Math.random() * 140);
+    targetFrame.setHealth(targetFrame.health.cur - dmg);
+    floats.spawn(crit ? `${dmg}!` : dmg, targetFrame.worldX + 190, targetFrame.worldY + 55, { crit, color: COLORS.negative });
+    playerFrame.setMana(playerFrame.mana.cur <= 8 ? playerFrame.mana.max : playerFrame.mana.cur - (2 + Math.floor(Math.random() * 6)));
+    // the spawn claws back; grave moss answers under 140
+    const claw = 6 + Math.floor(Math.random() * 14);
+    playerFrame.setHealth(Math.max(40, playerFrame.health.cur - claw));
+    floats.spawn(claw, playerFrame.worldX + 170, playerFrame.worldY + 55, { color: COLORS.negative });
+    if (playerFrame.health.cur < 140) {
+      playerFrame.setHealth(Math.min(playerFrame.health.max, playerFrame.health.cur + 60));
+      floats.spawn('+60', playerFrame.worldX + 120, playerFrame.worldY + 55, { color: COLORS.positive });
+    }
+    if (strikes % 4 === 0 && window.demoQuestApi && !broodDone) {
+      // the brood falls as the fight rages: the tracker's objective counts up live
+      slain = Math.min(10, slain + 1);
+      window.demoQuestApi.tracker.updateObjective(window.demoQuestApi.broodId, 0,
+        { progress: `${slain}/10`, done: slain >= 10 });
+    }
+    if (crit && window.demoCast?.casting && Math.random() < 0.4) {
+      window.demoCast.interrupt(); // the blow lands mid-syllable
+      EldEvents.log('The summoning is interrupted!', 'COMBAT');
+    }
+    if (targetFrame.health.cur <= 0) {
+      EldEvents.log('The Star-Spawn returns to its slumber.', 'COMBAT');
+      if (window.demoQuestApi && slain >= 10 && !broodDone) {
+        broodDone = true;
+        window.demoQuestApi.tracker.completeQuest(window.demoQuestApi.broodId);
+      }
+      setTimeout(() => {
+        playerFrame.setHealth(255, 255); playerFrame.setMana(100, 100);
+        targetFrame.setHealth(4500, 10000); targetFrame.setMana(500, 500);
+        EldEvents.log('Another shape coalesces in the dark…', 'COMBAT');
+      }, 2500);
+    }
+  }
+  engine.ticker.add((dt) => { if (!INSTRUMENTED) skirmishTick(dt); });
+}
+
+// ---------- 15. minimap ----------
+{
+  const s = section('Where You Are', 320, 'Zone, heading, zoom, and markers that answer clicks.');
+  const map = new Minimap({ zone: "R'lyeh Depths", zoneLevel: 'Level ??' });
+  map.addMarker('enemy', 25, 35);
+  map.addMarker('enemy', 70, 25);
+  map.addMarker('enemy', 60, 70);
+  map.addMarker('ally', 40, 55);
+  map.addMarker('ally', 55, 40);
+  map.addMarker('quest-exclaim', 75, 60);
+  map.addMarker('quest-question', 20, 70);
+  map.setPos(0, s.bodyY);
+  s.add(map);
+}
+
+// ---------- 16. quest tracker ----------
+{
+  const s = section('What You Owe', 260, 'Objectives that advance, complete and retire, each with a handle the game keeps.');
+  const qt = new QuestTracker({
+    header: 'Obligations',
+    quests: [
+      { title: 'The Lost Idol', objectives: [
+        { progress: '2/5', text: 'Collect idol fragments', done: true },
+        { progress: '0/1', text: 'Speak to the Elder', done: false },
+      ]},
+      { title: "Dagon's Bane", objectives: [
+        { progress: '0/10', text: 'Slay the deep brood', done: false },
+      ]},
+      { title: 'Supplies for the Lighthouse', objectives: [
+        { progress: '0/1', text: 'Deliver the oil to Keeper Hale', done: false },
+      ]},
+    ],
+  });
+  qt.setPos(0, s.bodyY);
+  s.add(qt);
+  // the combat-tick control (section 14) drives this quest live
+  window.demoQuestApi = { tracker: qt, broodId: qt.questNodes[1].id };
+}
+
+// ---------- 17. three.js showcase ----------
+{
+  const s = section('Beyond the DOM', 360, 'Things a WebGL interface can do that a stylesheet cannot: orbs of true liquid, rendered in the same pass as the panels around them.');
+  const c2 = card(s, 0, s.bodyY, 460, 272, 'Vitality & Sanity');
+  const orbH = new Globe({ kind: 'health', label: 'Vitality', value: 78, max: 100, radius: 44 });
+  const orbS = new Globe({ kind: 'sanity', label: 'Sanity', value: 54, max: 100, radius: 44 });
+  orbH.setPos(50, c2.bodyY + 16);
+  orbS.setPos(200, c2.bodyY + 16);
+  // the full sweep both ways: v=100 drains sanity to empty, v=0 fills it whole
+  // (the old 100 - v*0.6 mapping floored sanity at 40 — it could never empty)
+  const balance = (v) => { orbH.setValue(v); orbS.setValue(100 - v); };
+  const sl = new Slider({ value: 66, width: 240, onInput: balance });
+  sl.setPos(50, c2.bodyY + 170);
+  label(c2, 'Tip the balance', 50, c2.bodyY + 196);
+  c2.add(orbH, orbS, sl);
+  orbH.setValue(78); orbS.setValue(54);
+  window.demoOrbs = { health: orbH, sanity: orbS, balance }; // the suite sweeps the extremes
+
+  const c3 = card(s, 480, s.bodyY, 380, 126, 'The Summoning');
+  const cast = new CastBar({ width: 340 });
+  cast.setPos(16, c3.bodyY + 30);
+  c3.add(cast);
+  window.demoCast = cast; // the combat-tick control interrupts a cast mid-syllable
+  // The self-perpetuating summoning parks under EVERY instrument flag: it
+  // used to run unconditionally, so census runs watched a live cast — and a frozen
+  // settle that pumped past 3.5s virtual seconds completed the cast and armed a
+  // wall-clock setTimeout AFTER the bit-stable frame was sealed.
+  cast.on('castinterrupt', () => { if (!INSTRUMENTED) setTimeout(() => { if (!cast.casting) startLoop(); }, 1500); });
+  const startLoop = () => {
+    cast.startCast('Summoning Shoggoth', 'fireball2', 3.5);
+    cast.onComplete = () => {
+      EldEvents.log('The summoning completes. Something answers.', 'COMBAT');
+      setTimeout(startLoop, 1200);
+    };
+  };
+  if (!INSTRUMENTED) startLoop();
+}
+
+// ---------- footer ----------
+{
+  const f = new UINode({});
+  const t1 = new TextNode('LovecraftUI — stone, sigils, and starlight from a dead city.', { size: 12, color: COLORS.textFaint });
+  const t2 = new TextNode('A build-free WebGL game interface library. See README.md and docs/API.md.', { size: 11, color: COLORS.textDisabled });
+  f.add(t1, t2);
+  f.onLayout = () => {
+    t1.setPos(Math.round((PAGE_W - t1.w) / 2), 6);
+    t2.setPos(Math.round((PAGE_W - t2.w) / 2), 26);
+  };
+  f.setSize(PAGE_W, 60);
+  sections.push(f);
+  pageCol.add(f);
+}
+
+// frozen shots skip the boot log lines: their wall-clock timestamps are the one
+// nondeterministic pixel source on the page
+if (!FROZEN) EldEvents.log('Demo initialized successfully', 'SYSTEM');
+
+// verification helpers: ?scroll=N pre-scrolls the page, ?spawn=1 opens the demo windows
+const params = new URLSearchParams(location.search);
+if (params.has('spawn')) {
+  createReliquary();
+  openQuestWindow();
+  openSettingsPanel();
+  if (params.has('shrink')) {
+    // force both scrollbars on the settings window (verification aid)
+    const win = EldWindow.windows[EldWindow.windows.length - 1];
+    win.setRect(320, 40, 360, 300);
+  }
+}
+if (params.has('spawnchar')) {
+  openCharacterPanel();
+  createTaskGrimoire();
+}
+if (params.has('scroll')) {
+  const target = parseInt(params.get('scroll'), 10) || 0;
+  setTimeout(() => page.setScroll(target), 300);
+}
+if (params.has('gamepad')) {
+  // the hint overlay: what a standard pad does in this interface
+  const hint = new UINode({ name: 'gamepad-hint' });
+  const hintBg = new NineSliceNode(T.frame('tooltip.frame'));
+  const l1 = new TextNode('Gamepad', {
+    font: FONTS.header, size: 13, smallCaps: true, letterSpacing: 1, color: COLORS.accent,
+    shadow: { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 },
+  });
+  const l2 = new TextNode(
+    'D-Pad / Left Stick — move focus    A — activate    B — back\nBumpers — cycle    Right Stick — scroll',
+    { size: 12, color: COLORS.text, multiline: true, maxWidth: 360,
+      shadow: { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 } },
+  );
+  hint.add(hintBg, l1, l2);
+  hint.interactive = false;
+  engine.layers.vignette.add(hint);
+  hint.onLayout = function () {
+    l1.setPos(14, 10);
+    l2.setPos(14, 10 + l1.h + 6);
+    const w = 400, h = 10 + l1.h + 6 + l2.h + 12;
+    this.setRect(12, engine.height - 50 - h - 12, w, h);
+    hintBg.setRect(0, 0, w, h);
+  };
+}
+if (FROZEN) {
+  // finish every boot animation on a fixed clock, then halt the ticker: the canvas
+  // holds one bit-stable frame no matter when the screenshot is captured
+  setTimeout(() => {
+    const tk = engine.ticker;
+    tk.stop();
+    for (let i = 0; i < 600 && (tk.tweens.size > 0 || i < 20); i++) {
+      tk.time += 1 / 60;
+      tk._stepTweens(1 / 60);
+      for (const cb of [...tk.callbacks]) cb(1 / 60, tk.time);
+      if (tk._frame) tk._frame(1 / 60, tk.time);
+    }
+  }, 600);
+}
+window.demoApi = { page, createReliquary, createRituals, createTaskGrimoire, openQuestWindow, openCharacterPanel, openSettingsPanel, openForbiddenSciences };
+
+// ---- the ground circle: right-click on empty stone opens the wheel.
+// A right-click that lands on a widget belongs to that widget (the
+// ruling), so tooltips, slots, and the page scrollbar keep their presses.
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'windows', label: 'Windows', children: [
+ { id: 'reliquary', label: 'Reliquary' },
+ { id: 'rituals', label: 'Rituals' },
+ { id: 'quests', label: 'Quests' },
+ ] },
+ { id: 'quest', label: 'Quest' },
+ { id: 'investigator', label: 'Investigator' },
+ { id: 'settings', label: 'Settings' },
+ ],
+});
+const GROUND_VERBS = {
+  'windows/reliquary': createReliquary,
+  'windows/rituals': createRituals,
+  'windows/quests': createTaskGrimoire,
+  quest: openQuestWindow,
+  investigator: openCharacterPanel,
+  settings: openSettingsPanel,
+};
+ground.on('select', ({ id, path }) => (GROUND_VERBS[path.join('/')] ?? GROUND_VERBS[id])?.());
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+window.demoApi.ground = ground;
+// the input replay's handle bag (the seventh instrument): handles, never coordinates
+window.__demo = {
+  ground: () => ground,
+  winCount: () => EldWindow.windows.length,
+  slot0: () => window.__demoBar.slots[0],
+  shared: () => engine.radialShared,
+  sciBtn: () => window.__demoSciBtn,
+  closeTop: () => EldWindow.windows[EldWindow.windows.length - 1].close(),
+};
+
+// ---- ?assert=1: the in-page suite (behavior + key geometry, gated) ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    await wait(900); // settle: layout + boot tweens on the timer clock
+    // key geometry: the column CENTERS — the relational property, not the layout
+    // formula read back (the old assert mirrored pageCol.onLayout verbatim and
+    // could only ever agree with itself). Perfect centering is impossible once the
+    // 12px min-margin engages (engine.width < PAGE_W + 24): the column then pins
+    // up to 12px left of true center — hence the 13px bound (the margin + rounding).
+    ok('the column centers at the page width',
+      Math.abs((pageCol.x + pageCol.w / 2) - engine.width / 2) <= 13 && pageCol.w === PAGE_W);
+    let stacked = true;
+    for (let i = 1; i < sections.length; i++) {
+      if (sections[i].y < sections[i - 1].y + sections[i - 1].h) { stacked = false; break; }
+    }
+    ok('every section stacks clear of the one above', stacked && sections.length >= 15);
+    // freeze means freeze: under ASSERT (as under FROZEN) no page clock may move
+    // state — the progress ping-pong used to ride an ungated setInterval straight
+    // through the halted ticker, so the bar must now hold perfectly still
+    const bar1v = window.demoBar1.value;
+    await wait(200);
+    ok('the instrument clocks hold under the freeze contract', window.demoBar1.value === bar1v);
+    // a window round-trip: spawn -> minimize -> taskbar -> restore -> close
+    const before = EldWindow.windows.length;
+    openQuestWindow();
+    await wait(150);
+    const win = EldWindow.windows[EldWindow.windows.length - 1];
+    ok('a window spawns live', EldWindow.windows.length === before + 1 && win.visible === true);
+    win.minimize();
+    await wait(150);
+    ok('minimize parks it on the taskbar',
+      win.minimized === true && Eldritch.taskbar.items.some((i) => i.windowId === win.id));
+    // hit-reach: the chip the minimize just parked answers the REAL hit path at its
+    // center (dispatch bypasses hit testing — the occlusion proof for the one
+    // control that must stay clickable when everything else is put away)
+    const chip = Eldritch.taskbar.items.find((i) => i.windowId === win.id);
+    const chipHit = chip ? hitTest(engine, chip.worldX + chip.w / 2, chip.worldY + chip.h / 2) : null;
+    ok('hit-reach: the taskbar chip answers the real hit probe',
+      chip != null && (chipHit === chip || chip.isAncestorOf(chipHit)));
+    win.restore();
+    await wait(150);
+    ok('restore brings it back and clears the bar',
+      win.minimized === false && Eldritch.taskbar.items.every((i) => i.windowId !== win.id));
+    win.close();
+    await wait(150);
+    // the Investigator dialog hugs its honest panel (the dead-band fix):
+    // the window is MEASURED now, so the box exceeds the panel by exactly the 8px
+    // breathing and no scroll range exists at rest — and the panel itself declares
+    // precisely what its layout paints (the shared extent law, pinned live here)
+    {
+      const beforeChar = EldWindow.windows.length;
+      window.demoApi.openCharacterPanel();
+      await wait(150);
+      const cwin = EldWindow.windows[EldWindow.windows.length - 1];
+      const cpanel = cwin.content.children[0];
+      ok('investigator: the measured dialog hugs the honest panel',
+        EldWindow.windows.length === beforeChar + 1 &&
+        cwin.contentArea.vBarVisible === false && cwin.contentArea.maxScroll === 0 &&
+        cwin.contentArea.contentH === cpanel.y + cpanel.h &&
+        cwin.contentArea.boxH - cwin.contentArea.contentH === 8);
+      ok('investigator: the panel declares exactly what it paints',
+        (() => { const e = contentExtent(cpanel.children); return e.w === cpanel.w && e.h === cpanel.h; })());
+      // shrink the dialog well below its fit: the range that arms must be REAL
+      // (pre- the declared lie armed 166px of nothing here)
+      cwin.setRect(cwin.x, cwin.y, cwin.w, 300);
+      await wait(150);
+      ok('investigator: a shrunk dialog arms only real scroll range',
+        cwin.contentArea.vBarVisible === true && cwin.contentArea.maxScroll > 0 &&
+        runAudit(engine).counts.scrollbar === 0);
+      cwin.close();
+      await wait(150);
+    }
+    // every consumer window on this page fits what it paints:
+    // measured windows hug by construction, the two prose windows carry fitted
+    // literals — a rail at rest or >24px of dead band on ANY of them dies here
+    {
+      const hugFails = [];
+      const hugCheck = async (name, open) => {
+        const n0 = EldWindow.windows.length;
+        open();
+        await wait(150);
+        const w = EldWindow.windows[EldWindow.windows.length - 1];
+        const sa = w.contentArea;
+        const slack = sa.boxH - sa.contentH;
+        if (EldWindow.windows.length !== n0 + 1 || sa.vBarVisible || sa.maxScroll !== 0 || slack < 0 || slack > 24) {
+          hugFails.push(`${name}: boxH ${sa.boxH} contentH ${sa.contentH} vBar ${sa.vBarVisible}`);
+        }
+        w.close();
+        await wait(120);
+      };
+      await hugCheck('reliquary', window.demoApi.createReliquary);
+      await hugCheck('rituals', window.demoApi.createRituals);
+      await hugCheck('quests', window.demoApi.createTaskGrimoire);
+      await hugCheck('quest-details', window.demoApi.openQuestWindow);
+      await hugCheck('sciences', window.demoApi.openForbiddenSciences);
+      ok('the sweep windows hug their content — no dead bands, no phantom range'
+        + (hugFails.length ? ' [' + hugFails.join('; ') + ']' : ''), hugFails.length === 0);
+      // the always-open static window holds the same law without being spawned
+      const statSec = sections.find((s) => s.name === 'sec:Panels That Stay Put');
+      const statWin = statSec.children.find((n) => n.contentArea);
+      const statSlack = statWin.contentArea.boxH - statWin.contentArea.contentH;
+      ok('the static stats window hugs its rows'
+        + ` [boxH ${statWin.contentArea.boxH} contentH ${statWin.contentArea.contentH}]`,
+        statWin.contentArea.vBarVisible === false && statSlack >= 0 && statSlack <= 24);
+    }
+    // the Forbidden Sciences (the war-table pane, copied whole): the seventh door
+    // opens it, the pool banks fifteen, and the plates answer both mouse verbs
+    {
+      const w0 = EldWindow.windows.length;
+      window.__demoSciBtn.dispatch('click', {});
+      await wait(150);
+      const sciWin = EldWindow.windows[EldWindow.windows.length - 1];
+      const tree = window.__demoSci.pane('sciences');
+      ok('sciences: the seventh door opens the pane, ten rites banked at fifteen',
+        EldWindow.windows.length === w0 + 1 && sciWin.id === 'sciences'
+        && window.__demoSci.points === 15 && tree._plates.size === 10
+        && tree.getState('tithe') === 'available'
+        && tree.getState('abyss') === 'locked-tier');
+      tree._plates.get('tithe').dispatch('click', {});
+      await wait(60);
+      ok('sciences: a plate click spends through the pool',
+        tree.getRank('tithe') === 1 && window.__demoSci.points === 14);
+      tree._plates.get('ledger').dispatch('click', {});
+      await wait(60);
+      ok('sciences: the second tier refuses under five in-tree',
+        tree.getRank('ledger') === 0 && tree.getState('ledger') === 'locked-tier'
+        && window.__demoSci.points === 14);
+      tree._plates.get('tithe').dispatch('rightclick', {});
+      await wait(60);
+      sciWin.close();
+      await wait(150);
+      ok('sciences: the right-click refund returns the point, and the door closes clean',
+        tree.getRank('tithe') === 0 && window.__demoSci.points === 15
+        && EldWindow.windows.length === w0);
+    }
+    // the ground circle: a right-click on empty stone opens the wheel,
+    // and a nested Windows>Reliquary pick spawns the real window
+    {
+      const g = window.demoApi.ground;
+      engine.bus.emit('pointerdown', { x: 300, y: 500, button: 2, pointerId: 93, target: null, native: null });
+      await wait(60);
+      ok('ground: a right-click on empty stone opens the wheel', g.isOpen === true);
+      const w0 = EldWindow.windows.length;
+      g._setIndex(0, false); // Windows
+      g.onActivate();
+      await wait(40);
+      g._setIndex(0, false); // Reliquary
+      g.onActivate();
+      await wait(150);
+      ok('ground: the nested Reliquary pick spawns the real window',
+        g.isOpen === false && EldWindow.windows.length === w0 + 1);
+      EldWindow.windows[EldWindow.windows.length - 1].close();
+      await wait(150);
+      // THE RADIAL CHAIN — first through REAL input (the anti-fabrication
+      // pin: a fabricated bus emit called this page's wheel reachable for a
+      // whole release while a full-viewport ScrollArea made it untouchable):
+      engine.canvas.dispatchEvent(new PointerEvent('pointerdown', {
+        clientX: 300, clientY: 200, button: 2, buttons: 2, pointerId: 7, bubbles: true, isPrimary: true,
+      }));
+      await wait(40);
+      engine.canvas.dispatchEvent(new PointerEvent('pointerup', {
+        clientX: 300, clientY: 200, button: 2, buttons: 0, pointerId: 7, bubbles: true, isPrimary: true,
+      }));
+      await wait(80);
+      ok('chain: a REAL right-click on the covered showcase falls back to the ground wheel',
+        g.isOpen === true);
+      g.close({ silent: true });
+      await wait(40);
+      // the bar's provider and its DECLINE, through the dispatcher's own door
+      // (scroll-independent — the bar sits far down the page):
+      const slotD = window.__demoBar.slots[0];
+      EldDragDrop.createIconInSlot(slotD, 'fireball');
+      const openedD = engine.radialFallback(slotD, 400, 300, null);
+      const sharedD = engine.radialShared;
+      ok('chain: a FILLED slot offers its own verbs on the shared wheel',
+        openedD === true && sharedD?.isOpen === true && sharedD.items[0]?.id === 'invoke');
+      sharedD._setIndex(1, false); // Clear
+      sharedD.onActivate();
+      await wait(60);
+      ok('chain: the Clear verb empties the slot through the leaf onSelect',
+        sharedD.isOpen === false && EldDragDrop.getSlotIcon(slotD) == null);
+      engine.radialFallback(slotD, 400, 300, null);
+      await wait(40);
+      ok('chain: an EMPTY slot declines and the gesture lands on the ground wheel',
+        sharedD.isOpen === false && g.isOpen === true);
+      g.close({ silent: true });
+      await wait(40);
+    }
+    // a popup resolves through its OK path
+    const pr = EldPopup.show({ title: 'Proof', message: 'Resolve.' });
+    await wait(150);
+    EldPopup._finish('ok');
+    const res = await pr;
+    ok('a popup resolves through OK', res.action === 'ok');
+    await wait(300);
+    // the muster table boots ordered — silently (no sort event, no ledger line)
+    ok('the table boots Name-descending through the sort option',
+      window.demoTable.sort.column === 0 && window.demoTable.sort.ascending === false
+      && window.demoTable.getRows()[0][0] === 'Randolph Carter'
+      && window.demoTable.getRows()[3][0] === 'Herbert West');
+    // both orbs answer the balance at their extremes (sanity used to floor at 40)
+    const h0 = window.demoOrbs.health.value, s0 = window.demoOrbs.sanity.value;
+    window.demoOrbs.balance(100);
+    const drained = window.demoOrbs.health.value === 100 && window.demoOrbs.sanity.value === 0;
+    window.demoOrbs.balance(0);
+    const filled = window.demoOrbs.health.value === 0 && window.demoOrbs.sanity.value === 100;
+    window.demoOrbs.health.setValue(h0); window.demoOrbs.sanity.setValue(s0);
+    ok('the balance sweeps both orbs to both extremes', drained && filled);
+    // the whole page audits clean (the Stage 3 exit criterion, held from inside) —
+    // on every rule, not a hand-list: a five-name sum silently exempts whatever
+    // rule lands next (reach, the sixth, was invisible to it)
+    const c = runAudit(engine).counts;
+    ok('the page audits clean on every rule',
+      Object.values(c).reduce((a, b) => a + b, 0) === 0);
+    // the boot-health hooks are part of the contract: a suite that went green while
+    // an error rode the title would be measuring the wrong thing
+    ok('the page runs error-free end to end', window.__errs.length === 0);
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `DEMO ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+} else {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'DEMO READY';
+  }, 1000);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — MUD HUD</title>
+<!-- @demo   The Speaking Stones: a MUD in a window — clickable room prose in a pinned, GRIP-RESIZABLE scrollback, a command line with history, the body doll taking staged wounds, and ring/amulet fittings that refuse what they cannot wear.
+     @shows  BodyDoll, EquipmentRack, ChatBox, ItemGrid, EldContextMenu, EldNotify, EldDragDrop, ResourceBar, RadialMenu, Button, EldTooltip, UINode
+     @params ?freeze=1 — bit-stable snapshot boot (no ambiance, seeded feed, horror gated) · ?assert=1 — the in-page suite titles its own PASS count -->
+
+<!-- proof page (the chat grip and the drop oracle are showcased
+ and gated). Click the lit nouns in the room text (a context menu offers verbs;
+     the command line takes ArrowUp/Down history), scroll up while the dark keeps
+     talking — your place HOLDS until you jump back down — drag rings onto the
+     fittings (the sword is refused politely, both doorways — and the oracle
+ lights only the valid fittings the moment a drag starts), pull the chat's
+     corner grip to resize the feed, shift-click to unequip, watch the horror stage
+     wounds onto the doll, and `bandage l-arm` to stop the bleeding. The game owns
+     every model; the widgets afford and narrate. The horror clock boots cold under
+     FROZEN/ASSERT (the ambient-ticker rule); the suite stages it by hand. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {
+  Eldritch, BodyDoll, EquipmentRack, ChatBox, ItemGrid, EldContextMenu, EldNotify,
+  EldDragDrop, ResourceBar, RadialMenu, Button, EldTooltip, UINode, QuadNode, NineSliceNode, TextNode,
+  runAudit, hitTest, COLORS, FONTS, itemData, compileMarkup,
+} from '../src/lovecraft-ui.js';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+// INSTRUMENTED (the arcade/meters idiom): every census boot reads a RESTING dark —
+// the scripted horror timeline used to run through ?audit/?torture/?resize and could
+// raise a TOAST mid-census (a phantom node in the walked denominator).
+const INSTRUMENTED = FROZEN || ASSERT
+  || params.has('audit') || params.has('torture') || params.has('resize');
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+
+// ---- the icon pack (optional download): the RE-SKIN idiom ----
+// `as:` points at icon ids this page ALREADY uses, so the registry re-bakes those NAMES
+// in place: every live quad follows with no page code and no atlas movement.
+// `fallback: 'none'` leaves the procedural art standing when assets/ is absent, which is
+// the shipped default - the pack is an optional download and the page must not need it.
+// Skipped under FROZEN: --screenshot captures at the load event and cannot wait for an
+// async decode, so frozen baselines run on the procedural art by necessity.
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-3649', as: 'book' },
+      { id: 'ico-0210', as: 'shield' },
+      { id: 'ico-0513', as: 'sword' },
+      { id: 'ico-0489', as: 'blindinglight' },
+      { id: 'ico-0707', as: 'arrows' },
+      { id: 'ico-0307', as: 'leafs' },
+      { id: 'ico-0394', as: 'deathkiss' },
+      { id: 'ico-0017', as: 'fireball' },
+      { id: 'ico-0078', as: 'fireball2' },
+    ],
+  });
+}
+
+window.engine = engine;
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+
+// ---- the hoard: registered goods carry their own typing data ----
+Eldritch.registerItem('ring_bone', { name: 'Bone Ring', icon: 'leafs', stackMax: 1, data: { kind: 'ring' } });
+Eldritch.registerItem('ring_verdigris', { name: 'Verdigris Ring', icon: 'shield', rarity: 'rare', stackMax: 1, data: { kind: 'ring' } });
+Eldritch.registerItem('ring_iron', { name: 'Iron Ring', icon: 'sword', stackMax: 1, data: { kind: 'ring' } });
+Eldritch.registerItem('amulet_eye', { name: 'Eye Amulet', icon: 'blindinglight', rarity: 'epic', stackMax: 1, data: { kind: 'amulet' } });
+Eldritch.registerItem('sword_ritual', { name: 'Ritual Sword', icon: 'sword', rarity: 'rare', stackMax: 1, data: { kind: 'weapon' } });
+const isKind = (k) => (id) => itemData(id).data?.kind === k;
+
+// ---- the MUD window: markup links + the pinned scrollback + command history ----
+const feed = new ChatBox({ width: 520, height: 380, markup: true, placeholder: 'speak, or command…',
+  // the grip sits DIAGONALLY OPPOSITE the anchor: the feed pins top-left,
+  // so the handle lives bottom-right and growth never fights the re-pin
+  resizable: { corner: 'br', minW: 320, minH: 220 }, onSubmit: (v) => execute(v) });
+// Enter focuses the command line: a free Enter hands the
+// keyboard to the prompt so a command can start instantly. UNLIKE the chat pages, a
+// submit here KEEPS focus — a MUD's command line is the game, and you type the next
+// command straight after the last (the TextField's own submit-without-blur contract).
+Eldritch.onKey('Enter', { down: () => feed.focusInput() });
+engine.layers.background.add(feed);
+
+const NOUNS = {
+  rat: 'The rat is grey as drowned skin. It watches you back.',
+  door: 'Heavy oak, older than the tide. The hinges remember hands.',
+  lantern: 'The lantern burns without oil. Best not to ask what it burns.',
+  key: 'A rusted key, cold enough to sting.',
+  arm: 'Rent flesh — the claw knew its work. (try: bandage l-arm)',
+};
+// live lines carry wall-clock stamps; FROZEN seeds fixed ones (the baseline rule)
+const say = (msg, tag) => {
+  if (FROZEN) feed.scrollback.append('[--:--:--]', tag, msg);
+  else feed.log(msg, tag);
+};
+function room() {
+  say('{b}The Drowned Vestibule{/}', 'ROOM');
+  say('A {link:rat}grey rat{/} gnaws at the foot of a {link:door}heavy door{/}.', 'ROOM');
+  say('A {link:lantern}pale lantern{/} gutters over a {link:key}rusted key{/}.', 'ROOM');
+  say('The word {hl:#3a2a10}{color:#e8d86a}AZATHOTH{/}{/} is carved into the stone.', 'ROOM');
+}
+function execute(v) {
+  const cmd = v.trim().toLowerCase();
+  if (cmd === 'look') { room(); return; }
+  if (cmd.startsWith('look ')) {
+    const noun = cmd.slice(5).trim();
+    feed.log(NOUNS[noun] ?? 'You see nothing worth the candle.', 'LOOK');
+    return;
+  }
+  if (cmd.startsWith('bandage ')) {
+    const part = cmd.slice(8).trim();
+    if (body.getPart(part)?.bleed) {
+      body.setPart(part, { bleed: false });
+      feed.log(`You bind the ${part}. The bleeding stops.`, 'AID');
+    } else feed.log('Nothing there is bleeding. Yet.', 'AID');
+    return;
+  }
+  if (cmd === 'help') { feed.log('Try: look · look <noun> · bandage <part> · or click the lit words.', 'HELP'); return; }
+  feed.log('The dark does not answer.', 'MUD');
+}
+
+// clicked nouns offer verbs — the context-menu wiring every MUD wants
+feed.on('linkclick', (e) => {
+  EldContextMenu.show([
+    { label: `Look at the ${e.text}`, onClick: () => execute(`look ${e.id}`) },
+    { label: `Take the ${e.text}`, onClick: () => feed.log(`The ${e.text} refuses to be owned.`, 'MUD') },
+    { separator: true },
+    { label: `Strike the ${e.text}`, onClick: () => feed.log(`You strike. The ${e.text} abides.`, 'MUD') },
+  ], e.x, e.y);
+});
+
+// ---- vitals: static warn tiers ----
+const vitals = new ResourceBar({ chips: [
+  { icon: 'fireball', value: 74, cap: 100, warnAt: 25, width: 110 },   // vigor
+  { icon: 'blindinglight', value: 52, cap: 100, warnAt: 20, width: 110 }, // sanity
+], gap: 8 });
+engine.layers.background.add(vitals);
+
+// ---- the body: the GAME owns the model, the doll affords ----
+const body = new BodyDoll({
+  onPartClick: (e) => feed.log(
+    `You examine your ${e.part}: ` +
+    (e.missing ? 'gone.' : e.bleed ? 'bleeding.' : e.damage > 0 ? `hurt (${e.damage}).` : 'whole.'), 'BODY'),
+});
+engine.layers.background.add(body);
+body.setPart('chest', { scars: 1 }); // an old story
+
+// ---- the worn rack over a satchel: typed fittings ----
+const rack = new EquipmentRack({
+  zones: [
+    { id: 'rings', label: 'Rings', slots: 6, accepts: isKind('ring') },
+    { id: 'amulets', label: 'Amulets', slots: 2, accepts: isKind('amulet') },
+  ],
+  onEquipChange: (v, e) => feed.log(`Worn: ${e.action} ${e.item ?? ''} at ${e.zone}[${e.index}].`, 'GEAR'),
+});
+engine.layers.background.add(rack);
+
+const satchel = new ItemGrid({ cols: 4, rows: 2 });
+satchel.setItem(0, 'ring_bone', 1);
+satchel.setItem(1, 'ring_verdigris', 1);
+satchel.setItem(2, 'amulet_eye', 1);
+satchel.setItem(3, 'sword_ritual', 1);
+satchel.setItem(4, 'ring_iron', 1);
+engine.layers.background.add(satchel);
+rack.linkTransfer(satchel);            // shift-click a worn ring: it returns to the satchel
+satchel.linkTransfer(rack.getZone('rings')); // shift-click a bagged ring: it seeks a fitting
+
+const stripBtn = new Button('Strip All', {
+  minWidth: 110,
+  onClick: () => feed.log(`You shed ${rack.transferAll(satchel)} pieces.`, 'GEAR'),
+});
+engine.layers.background.add(stripBtn);
+
+// ---- the horror: a page-clocked encounter staging wounds onto the doll.
+// It boots COLD under FROZEN/ASSERT (the ambient-ticker rule — banners and
+// staged wounds hold neither baselines nor settled reads); the suite stages
+// the whole encounter by hand through the same clock. ----
+const SCRIPT = [
+  { at: 4, run: () => { EldNotify.send({ channel: 'banner', title: 'SOMETHING SCRAPES BELOW' }); feed.log('Something scrapes beneath the floor.', 'OMEN'); } },
+  { at: 8, run: () => { body.setPart('l-arm', { damage: 1 }); feed.log('A claw finds your {link:arm}left arm{/}.', 'HURT'); } },
+  { at: 12, run: () => { body.setPart('l-arm', { damage: 2, bleed: true }); feed.log('The arm again — deeper. It {color:#a83232}bleeds{/}. (try: bandage l-arm)', 'HURT'); } },
+  { at: 16, run: () => { EldNotify.send({ channel: 'toast', title: 'The scraping recedes', message: 'For now.' }); } },
+];
+let clock = 0, stage = 0;
+const horrorTick = (dt) => {
+  clock += dt;
+  while (stage < SCRIPT.length && clock >= SCRIPT[stage].at) SCRIPT[stage++].run();
+};
+engine.ticker.add((dt) => { if (!INSTRUMENTED) horrorTick(dt); });
+
+room();
+say('(help lists the words the dark obeys)', 'HELP');
+
+// ---- chrome glue ----
+// the feed's width is GLUED to the lane the worn column leaves free until the
+// user takes the grip (the parked idiom): at 1024×640 a fixed 520 collides with
+// the rack column — the resizable widget is the one that gives way
+// the grip sets feed.userPlaced itself now (was a page-side feedTaken —
+// takeFeed keeps its name so the input replay script's bag API is unchanged)
+window.__mud = { takeFeed: () => { feed.userPlaced = true; }, feed, body,
+  rooms: () => ROOMS, roomHit: (id) => (roomHits.find((rh) => rh.room.id === id) || {}).hit,
+  ground: () => ground }; // ground: the wheel, declared below ROOMS (lazy)
+// ---- the ways known: the chart a MUD player keeps beside the prose ----
+// everything below the feed was empty - about a third of the frame. A MUD's
+// world IS its text, so this page needs no 3D scene; what it was missing is the OTHER
+// half of the interface. The chart is one page-owned raster inside a real stone panel
+// (registry-free, so the atlas budget never moves), and it reads the same room the
+// prose does.
+const ROOMS = [
+  // `short` is what the map plate shows. STYLE 1a.1: shorten the WORD rather than
+  // truncate it to nonsense — "Drowned Stair" clipped to fit read as "Drowned ." The
+  // prose still says the full name; the plate says the useful part of it.
+  { id: 'vestibule', label: 'Vestibule', gx: 1, gy: 1, here: true },
+  { id: 'stair', label: 'Drowned Stair', short: 'Stair', gx: 1, gy: 0 },
+  { id: 'cells', label: 'Cells', gx: 0, gy: 1 },
+  { id: 'font', label: 'The Font', gx: 2, gy: 1 },
+  { id: 'deep', label: '?', gx: 2, gy: 2, unknown: true },
+];
+const WAYS = [['vestibule', 'stair'], ['vestibule', 'cells'], ['vestibule', 'font'], ['font', 'deep']];
+// one plate size for the paint AND the hit zones seated on it (and the suite's
+// measurements — a literal repeated three ways is three chances to drift)
+const ROOM_BW = 54, ROOM_BH = 26;
+const MAP_FONT = '9px Consolas, monospace';
+// Truncate to the MEASURED width, not to a guessed character count. "Drowned Stair"
+// clipped at 11 chars is "Drowned St." — eleven 9px monospace glyphs is ~59px in a
+// 54px box, so the text leaked out of the rectangle it was supposed to sit in.
+// One function, two callers: paintChart draws through it and the suite measures
+// through it, so the property gated is the property painted.
+function fitLabel(g, name, bw) {
+  let label = name;
+  if (g.measureText(label).width > bw - 8) {   // the safety net, if a name still runs long
+    while (label.length > 1 && g.measureText(label.replace(/\s+$/, '') + '.').width > bw - 8) {
+      label = label.slice(0, -1);
+    }
+    label = label.replace(/\s+$/, '') + '.';   // never strand a space before the dot
+  }
+  return label;
+}
+const chart = new UINode({ name: 'ways-known' });
+const chartBg = new NineSliceNode(engine.textures.frame('panel.dark'));
+const CHART_W = 250, CHART_H = 186;
+chartBg.setRect(0, 0, CHART_W, CHART_H);
+// STYLE 1a.1: the panel is a MAP. It was titled "The Ways Known", which names the mood
+// and hides the function - and it was a painted picture, so the rooms looked like buttons
+// and did nothing when clicked. Both halves of the report, same root.
+const chartTitle = new TextNode('Map — click a room to walk there', {
+  font: FONTS.header, size: 12, smallCaps: true, letterSpacing: 1, color: COLORS.accent,
+  shadow: { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 },
+});
+chartTitle.setPos(12, 8);
+const chartCanvas = document.createElement('canvas');
+const chartTex = new THREE.CanvasTexture(chartCanvas);
+chartTex.colorSpace = THREE.SRGBColorSpace;
+chartTex.minFilter = THREE.LinearFilter;
+chartTex.magFilter = THREE.LinearFilter;
+chartTex.generateMipmaps = false;
+const chartQuad = new QuadNode({ texture: chartTex });
+const MAP_W = CHART_W - 24, MAP_H = CHART_H - 42;
+chartQuad.setRect(12, 30, MAP_W, MAP_H);
+chart.add(chartBg, chartTitle, chartQuad);
+chart.setSize(CHART_W, CHART_H);
+engine.layers.background.add(chart);
+chart.on('dispose', () => chartTex.dispose());
+function paintChart() {
+  const px = Math.max(1, Math.round(window.devicePixelRatio || 1));
+  chartCanvas.width = MAP_W * px; chartCanvas.height = MAP_H * px;
+  const g = chartCanvas.getContext('2d');
+  g.scale(px, px);
+  const cellW = MAP_W / 3, cellH = MAP_H / 3;
+  const at = (r) => ({ x: r.gx * cellW + cellW / 2, y: r.gy * cellH + cellH / 2 });
+  g.strokeStyle = 'rgba(111,209,139,0.28)';           // the ways between them
+  g.lineWidth = 2;
+  for (const [a, b] of WAYS) {
+    const ra = at(ROOMS.find((r) => r.id === a)), rb = at(ROOMS.find((r) => r.id === b));
+    g.beginPath(); g.moveTo(ra.x, ra.y); g.lineTo(rb.x, rb.y); g.stroke();
+  }
+  for (const room of ROOMS) {
+    const p = at(room), bw = ROOM_BW, bh = ROOM_BH;
+    g.fillStyle = room.here ? 'rgba(111,209,139,0.20)' : 'rgba(12,16,14,0.9)';
+    g.fillRect(p.x - bw / 2, p.y - bh / 2, bw, bh);
+    g.strokeStyle = room.here ? '#6fd18b' : (room.unknown ? 'rgba(120,132,124,0.4)' : 'rgba(92,103,94,0.7)');
+    g.lineWidth = room.here ? 2 : 1;
+    if (room.unknown) g.setLineDash([3, 3]);
+    g.strokeRect(p.x - bw / 2, p.y - bh / 2, bw, bh);
+    g.setLineDash([]);
+    g.fillStyle = room.here ? '#cfe9d6' : (room.unknown ? '#6d786f' : '#9fb0a4');
+    g.font = MAP_FONT;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(fitLabel(g, room.short ?? room.label, bw), p.x, p.y);
+  }
+  chartTex.needsUpdate = true;
+}
+paintChart();
+// The rooms are REAL: one hit zone per room, seated on its painted box, so clicking a
+// linked room walks you there and the prose says so. A panel that looks like a set of
+// buttons and answers to nothing is the defect STYLE 1a.1 exists to stop.
+const roomHits = ROOMS.map((room) => {
+  const hit = new UINode({ interactive: true, name: `room-${room.id}` });
+  const wash = new QuadNode({ color: COLORS.accent, opacity: 0 });
+  hit.add(wash);
+  hit.on('pointerenter', () => { if (!chart.closest((n) => n.disabled === true)) wash.setBaseOpacity(0.18); });
+  hit.on('pointerleave', () => wash.setBaseOpacity(0));
+  hit.on('click', () => travelTo(room.id));
+  EldTooltip.attach(hit, () => (room.unknown
+    ? { title: 'Unmapped', desc: 'You have not been this way.' }
+    : { title: room.label, desc: room.here ? 'You are here.' : 'Walk here.' }));
+  chart.add(hit);
+  return { room, hit, wash };
+});
+function layoutRooms() {
+  const cellW = MAP_W / 3, cellH = MAP_H / 3, bw = ROOM_BW, bh = ROOM_BH;
+  for (const { room, hit, wash } of roomHits) {
+    const x = 12 + room.gx * cellW + cellW / 2 - bw / 2;
+    const y = 30 + room.gy * cellH + cellH / 2 - bh / 2;
+    hit.setRect(Math.round(x), Math.round(y), bw, bh);
+    wash.setRect(0, 0, bw, bh);
+  }
+}
+layoutRooms();
+function travelTo(id) {
+  const room = ROOMS.find((r) => r.id === id);
+  const here = ROOMS.find((r) => r.here);
+  if (!room || !here || room === here) return;
+  const linked = WAYS.some(([a, b]) => (a === here.id && b === id) || (b === here.id && a === id));
+  if (!linked) { say(`No way leads from ${here.label} to ${room.unknown ? 'there' : room.label}.`, 'MOVE'); return; }
+  if (room.unknown) { room.unknown = false; room.label = 'The Deep'; }
+  here.here = false;
+  room.here = true;
+  paintChart();
+  say(`You walk to {b}${room.label}{/}.`, 'MOVE');
+}
+
+// ---- the ground circle: right-click on the stone opens the wheel.
+// Travel lists EVERY named room and rides travelTo whole — the unlinked ones
+// refuse LOUDLY through the page's own voice (the same refusal the map plates
+// speak), which is the honest shape for a static ring over a live world.
+const ground = new RadialMenu({
+  ground: true, // the radial chain's terminus — an unconsumed right-click lands here
+  items: [
+    { id: 'travel', label: 'Travel', children: ROOMS.filter((r) => !r.unknown)
+      .map((r) => ({ id: r.id, label: r.short ?? r.label })) },
+    { id: 'speak', label: 'Speak', children: [
+      { id: 'look', label: 'Look' },
+      { id: 'help', label: 'Help' },
+    ] },
+  ],
+});
+ground.on('select', ({ id, path }) => {
+  if (path[0] === 'travel') travelTo(id);
+  else if (path[0] === 'speak') execute(id);
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+
+const exitsLine = new TextNode('Ways out: north, west, east.', {
+  size: 11, color: COLORS.textMuted, shadow: { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 },
+});
+engine.layers.background.add(exitsLine);
+
+const hud = new UINode({ name: 'mud-chrome' });
+engine.layers.background.add(hud);
+hud.onLayout = function () {
+  const W = engine.width, H = engine.height;
+  vitals.setPos(16, 12);
+  const colX = W - body.w - rack.w - 32; // the worn column: rack, satchel, strip aligned
+  // The feed's HEIGHT is a lane budget too, not just its width. The chart sits under
+  // it, and at 1264x665 a fixed 380 feed plus a 186 chart plus the taskbar band needs
+  // 742px of a 665px frame - the two ran 39px into each other (one overlap violation,
+  // measured). Both now derive from what the frame actually has.
+  const chartY = Math.max(220, H - 74 - 16 - chart.h);
+  if (!feed.userPlaced) {
+    const fw = Math.max(320, Math.min(520, colX - 32));
+    const fh = Math.max(200, chartY - 80);
+    if (feed.w !== fw || feed.h !== fh) feed.setSize(fw, fh);
+  }
+  // THE FREEDOM LAW: no element budgets the grip — a
+  // grown feed may cover the worn column and the chart if the player wants it
+  // there. The only ceiling is ResizeGrip's own: the drag handle stays within
+  // the visible screen. (The lane GLUE above is boot auto-layout only — it
+  // stands down forever at the grip's first claim.)
+  feed.setPos(16, 64);
+  body.setPos(W - body.w - 16, 64);
+  rack.setPos(colX, 64);
+  satchel.setPos(colX, 64 + rack.h + 12);
+  stripBtn.setPos(colX, 64 + rack.h + 12 + satchel.h + 10);
+  chart.setPos(16, chartY);
+  exitsLine.setPos(16, chartY + chart.h + 6);
+};
+
+// ---- ?assert=1: the in-page kit suite ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  setTimeout(async () => {
+    const settle = () => new Promise((r) => setTimeout(r, 50)); // layout passes measure the scrollback
+    // links compile and the scrollback wires itself
+    ok('link runs compile with ids', compileMarkup('{link:rat}the rat{/}')[0].link === 'rat');
+    ok('linked lines auto-wire in the scrollback',
+      feed.scrollback.entries.some((ln) => ln.interactive === true && Array.isArray(ln._fragments)));
+    // the pin holds a reading position and re-pins on command
+    for (let i = 0; i < 20; i++) feed.log(`the wind keens (${i})`, 'MUD');
+    await settle();
+    feed.scrollback.scroll.setScroll(0);
+    await settle();
+    feed.log('while you were reading', 'MUD');
+    ok('the pin holds a scrolled-up reader',
+      feed.scrollback.scroll.content.scrollY === 0 && feed.atBottom === false);
+    feed.scrollToBottom();
+    await settle();
+    feed.log('back at the tail', 'MUD');
+    await settle();
+    ok('the explicit re-pin follows again', feed.atBottom === true);
+    // the fittings refuse what they cannot wear
+    const moved = satchel.transferAll(rack.getZone('rings'));
+    ok('the ring fittings take rings and refuse the rest',
+      moved === 3 && satchel.getItem(3)?.item === 'sword_ritual' && satchel.getItem(2)?.item === 'amulet_eye' &&
+      rack.getItem('rings', 0) !== null && rack.getItem('rings', 2) !== null);
+    // the doll reads back and stays silent under programmatic patches
+    let changes = 0;
+    body.on('partchange', () => changes++);
+    body.setPart('r-leg', { damage: 2, bleed: true });
+    const st = body.getPart('r-leg');
+    ok('the doll reads back merged state silently',
+      st.damage === 2 && st.bleed === true && changes === 0);
+    // zone-context equip narration
+    let equips = 0, lastZone = null;
+    rack.on('equipchange', (e) => { equips++; lastZone = e.zone; });
+    rack.setItem('amulets', 0, 'amulet_eye', 1, { silent: false });
+    ok('equipchange carries the zone', equips === 1 && lastZone === 'amulets');
+    // the command loop grows the feed WITH THE ROOM PROSE — bare growth would
+    // pass on any line at all, an error line included
+    const lineText = (ln) => (ln._segments ?? []).map((s) => s.text ?? '').join('');
+    const before = feed.scrollback.entries.length;
+    execute('look');
+    ok('the parser answers into the feed with the room prose',
+      feed.scrollback.entries.length > before
+      && lineText(feed.scrollback.entries[before]).includes('ROOM ')
+      && lineText(feed.scrollback.entries[before]).includes('The Drowned Vestibule'));
+
+    // the grip is armed, and a programmatic resize reaches the innards
+    // while the at-bottom pin holds (release the lane glue first — the suite IS
+    // the user taking the feed)
+    window.__mud.takeFeed();
+    feed.scrollToBottom();
+    await settle();
+    const fw0 = feed.w, fh0 = feed.h, sbw0 = feed.scrollback.w;
+    feed.setSize(420, 320);
+    await settle(); await settle();
+    const legGrip = feed.grip != null;
+    const legW = feed.w;
+    const legSbw = feed.scrollback.w;
+    const resized = legGrip && legW === 420 && legSbw < sbw0;
+    const pinned = feed.atBottom === true;
+    feed.setSize(fw0, fh0);
+    await settle();
+    ok('the chat grip is armed and a resize re-pins the tail', resized && pinned);
+
+    // the drop oracle on this page's typed fittings — rings light,
+    // the sword is refused before any drop lands
+    const ringZone = rack.getZone('rings');
+    const canRing = EldDragDrop.canAccept(ringZone.slots[4], { itemId: 'ring_bone', count: 1, sourceSlot: ringZone.slots[0] });
+    const canSword = EldDragDrop.canAccept(ringZone.slots[4], { itemId: 'sword_ritual', count: 1, sourceSlot: satchel.slots[3] });
+    ok('the drop oracle lights rings and refuses the sword', canRing === true && canSword === false);
+
+    // the map rooms are REAL controls. The probe proves a pointer can land
+    // on one (dispatch bypasses hit testing — the probe is the honest half), the
+    // click walks the MODEL, and the prose narrates the walk.
+    const fontHit = roomHits.find((rh) => rh.room.id === 'font').hit;
+    const probe = hitTest(engine, fontHit.worldX + fontHit.w / 2, fontHit.worldY + fontHit.h / 2);
+    ok('hit-reach: a map room answers the real hit probe',
+      probe === fontHit || (fontHit.isAncestorOf ? fontHit.isAncestorOf(probe) : false));
+    const beforeWalk = feed.scrollback.entries.length;
+    fontHit.dispatch('click', {});
+    await settle();
+    ok('clicking a linked room walks there and the prose says so',
+      ROOMS.find((r) => r.here).id === 'font'
+      && feed.scrollback.entries.length === beforeWalk + 1
+      && lineText(feed.scrollback.entries[beforeWalk]).includes('You walk to The Font.'));
+
+    // the plate labels ride the page's own fitLabel: whole when the name fits the
+    // plate, measured-and-dotted when it cannot — never a guessed character count
+    const mg = document.createElement('canvas').getContext('2d');
+    mg.font = MAP_FONT;
+    const whole = fitLabel(mg, 'Stair', ROOM_BW);
+    const cut = fitLabel(mg, 'Drowned Stair', ROOM_BW);
+    ok('a plate label paints whole when it fits and shortens to the measured box',
+      whole === 'Stair' && mg.measureText(whole).width <= ROOM_BW - 8
+      && cut.endsWith('.') && !/\s\.$/.test(cut)
+      && cut.length < 'Drowned Stair'.length && mg.measureText(cut).width <= ROOM_BW - 8);
+
+    await settle(); await settle();
+    const cts = runAudit(engine).counts;
+    ok('the page audits clean on every rule',
+      Object.values(cts).reduce((a, b) => a + b, 0) === 0);
+
+    // last: the staged horror raises a banner and a toast — live overlays that
+    // must not sit under the audit; the bandage answers through the parser
+    horrorTick(20);
+    await settle();
+    const wounded = body.getPart('l-arm').bleed === true;
+    execute('bandage l-arm');
+    await settle();
+    ok('the horror wounds by hand and the bandage binds', wounded && body.getPart('l-arm').bleed === false);
+
+    // Enter-to-chat: a free Enter focuses the command line;
+    // a submit KEEPS it (the MUD convention - the next command follows the last)
+    engine.setFocus(null);
+    await settle();
+    engine.bus.emit('keydown', { key: 'Enter' });
+    await settle();
+    ok('a free Enter focuses the command line in its editing state',
+      engine.focusedNode === feed.field && feed.field._wantsTextInput === true);
+    feed.field.setValue('look');
+    feed.field.dispatch('keydown', { key: 'Enter' });
+    await settle();
+    ok('a submit keeps the command line focused (the MUD convention)',
+      engine.focusedNode === feed.field && feed.field._wantsTextInput === true);
+    engine.setFocus(null);
+    await settle();
+
+    // the ground circle: right-click on the stone opens the wheel, and
+    // the nested Travel pick walks the SAME travelTo the map plates walk
+    engine.bus.emit('pointerdown', { x: 640, y: 500, button: 2, pointerId: 61, target: null, native: null });
+    await settle();
+    ok('ground: a right-click on the stone opens the wheel',
+      window.__mud.ground().isOpen === true);
+    const hereBefore = ROOMS.find((r) => r.here).id;
+    window.__mud.ground()._setIndex(0, false); // Travel
+    window.__mud.ground().onActivate();
+    await settle();
+    // pick a room LINKED from wherever the suite left the party (the input replay walked
+    // rooms earlier; vestibule links stair/cells/font — pick by lookup, not index)
+    const linked = ['stair', 'cells', 'font', 'vestibule'].find((id) =>
+      id !== hereBefore && WAYS.some(([a, b]) => (a === hereBefore && b === id) || (b === hereBefore && a === id)));
+    const li = window.__mud.ground()._ring.findIndex((it) => it.id === linked);
+    window.__mud.ground()._setIndex(li, false);
+    window.__mud.ground().onActivate();
+    await settle();
+    ok('ground: the nested Travel pick walks the party through travelTo',
+      window.__mud.ground().isOpen === false && ROOMS.find((r) => r.here).id === linked);
+
+    ok('no errors reached the console during the run', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `MUDHUD ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  }, 1200);
+} else {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'MUDHUD READY';
+  }, 1000);
+}
+</script>
+</body>
+</html>

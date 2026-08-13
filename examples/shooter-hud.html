@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Shooter HUD</title>
+<!-- @demo   The Iron Sights over a LIVING firefight: the mouse pans your aim across a harbor night of drifting horrors, the compass tape slides with your yaw, shots raycast from the fixed reticle — markers stamp ON the enemy, kills feed the board and the score — return fire lights the true bearing, ward regens after quiet, and holding the Drowned Chapel charges the point.
+     @shows  Reticle, HitMarker, AmmoCounter, DamageIndicator, Killfeed, CompassStrip, SegmentedBar, WorldAnchorLayer, TitleCard, InputPrompt, RadialMenu, TextNode, UINode, QuadNode, NineSliceNode
+     @params ?freeze=1 — bit-stable snapshot boot (spread parked, ring dark, feed pinned) · ?assert=1 — the in-page suite titles its own PASS count -->
+
+<!-- the proof page, rebuilt around a real world model. The reticle
+     holds screen center; the MOUSE pans yaw (±45°), so the compass finally moves,
+     damage bearings are honest world-minus-yaw math, and firing (click, held
+     Space, or the Fire button) raycasts the reticle against four pooled enemy
+     plates riding a cylindrical projection. Hit: the plate's bar sweeps, a marker
+     stamps AT it, the sight flashes. Kill: blood flash, killfeed, +100, the plate
+     fades and reseeds — the pool never allocates. Enemies answer on a
+     deterministic ladder (the ring lights their true bearing; ward soaks first
+     and regens after 3s of quiet; armor 0 is a downed beat, -250). Past t≈6s the
+     Watch must HOLD the chapel: keep its marker centered and the point charges —
+     held, the wave resets harder. Four idle seconds hand the watch to an
+     autopilot that aims and fires by itself — input takes it back. Census boots
+     (?audit/?torture/?resize) and frozen shots park the whole sim at the source. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import {
+  Eldritch, Reticle, HitMarker, AmmoCounter, DamageIndicator, Killfeed,
+  CompassStrip, SegmentedBar, WorldAnchorLayer, TitleCard, InputPrompt, RadialMenu, TextNode,
+  UINode, QuadNode, NineSliceNode, COLORS, FONTS, hitTest,
+} from '../src/lovecraft-ui.js';
+import * as THREE from 'three';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+// the census boots must see the RESTING hud — the sim gates at the source (the
+// old 12-second dead window is gone)
+const INSTRUMENTED = FROZEN || ASSERT
+  || params.has('audit') || params.has('torture') || params.has('resize');
+// L12: the ?uiscale= hook — the couch-distance baseline set shoots through it
+const UISCALE = Number(params.get('uiscale'));
+const SCALE_OPT = Number.isFinite(UISCALE) && UISCALE > 0 ? { uiScale: UISCALE } : {};
+Eldritch.init(FROZEN || ASSERT
+  ? { ...SCALE_OPT, background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { ...SCALE_OPT, contextMenu: false }); // right-click opens the sight wheel — the canvas owns its menu
+const engine = Eldritch.engine;
+
+// ---- the icon pack (optional download): the RE-SKIN idiom ----
+// `as:` points at icon ids this page ALREADY uses, so the registry re-bakes those NAMES
+// in place: every live quad follows with no page code and no atlas movement.
+// `fallback: 'none'` leaves the procedural art standing when assets/ is absent, which is
+// the shipped default - the pack is an optional download and the page must not need it.
+// Skipped under FROZEN: --screenshot captures at the load event and cannot wait for an
+// async decode, so frozen baselines run on the procedural art by necessity.
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-3649', as: 'book' },
+      { id: 'ico-0210', as: 'shield' },
+      { id: 'ico-0513', as: 'sword' },
+      { id: 'ico-0489', as: 'blindinglight' },
+      { id: 'ico-0707', as: 'arrows' },
+      { id: 'ico-0307', as: 'leafs' },
+      { id: 'ico-0394', as: 'deathkiss' },
+      { id: 'ico-0017', as: 'fireball' },
+      { id: 'ico-0078', as: 'fireball2' },
+    ],
+  });
+}
+
+window.engine = engine;
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+
+// Page placement must CHAIN a widget's own onLayout, never clobber it.
+const place = (node, fn) => {
+  const own = node.onLayout?.bind(node);
+  node.onLayout = function () { own?.(); fn.call(this); };
+};
+
+// ---- the world model: yaw, four pooled horrors, the watch's vitals ----
+const PXD = 9; // px per degree on the cylindrical window
+const norm = (d) => ((d % 360) + 360) % 360;
+const sim = {
+  yaw: 320, baseYaw: 320, lastMx: null,
+  score: 0, shield: 3, shieldMax: 3, armor: 4, armorMax: 4,
+  quietT: 99, regenT: 0, point: 0.6, phase: 'watch', waveSpeed: 1,
+  fireT: 0, ladder: 0, idleT: 0, autoT: 0, combat: false, t: 0,
+};
+const relOf = (bearing) => ((bearing - sim.yaw + 540) % 360) - 180;
+function project(bearing, _y, dist) {
+  const rel = ((bearing - sim.yaw + 540) % 360) - 180;
+  return {
+    sx: engine.width / 2 + rel * PXD,
+    sy: Math.round(engine.height * 0.42 + 9000 / dist),
+    visible: Math.abs(rel) < 65,
+    depth: dist,
+  };
+}
+
+// ---- the backdrop: ONE page-owned canvas (was 80 dot quads) — the harbor night ----
+const backdrop = new UINode({ name: 'harbor-night' });
+const bdCanvas = document.createElement('canvas');
+const bdTex = new THREE.CanvasTexture(bdCanvas);
+bdTex.colorSpace = THREE.SRGBColorSpace;
+const bdQuad = new QuadNode({ texture: bdTex });
+backdrop.add(bdQuad);
+function paintBackdrop() {
+  const W = Math.max(2, engine.width), H = Math.max(2, engine.height);
+  if (bdCanvas.width !== W || bdCanvas.height !== H) { bdCanvas.width = W; bdCanvas.height = H; }
+  const ctx = bdCanvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+  const horizon = Math.round(H * 0.42);
+  // this was a flat moon disc, two rules and five rows of dots. Brought to the
+  // same bar as the other worlds - sky, a breakwater with its lamps, real water.
+  const r = (() => { let s = 30517; return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff; })();
+  const sky = ctx.createLinearGradient(0, 0, 0, horizon);
+  sky.addColorStop(0, '#04070a');
+  sky.addColorStop(1, '#0b1519');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, horizon);
+  for (let i = 0; i < 70; i++) {                    // stars over the harbour
+    ctx.fillStyle = `rgba(190,215,205,${0.05 + r() * 0.14})`;
+    ctx.fillRect(r() * W, r() * horizon * 0.85, 1.4, 1.4);
+  }
+  // the drowned moon, with the halo a wet night gives it
+  const mx = W * 0.72, my = horizon - 90;
+  const halo = ctx.createRadialGradient(mx, my, 6, mx, my, 160);
+  halo.addColorStop(0, 'rgba(183,192,182,0.13)');
+  halo.addColorStop(1, 'rgba(183,192,182,0)');
+  ctx.fillStyle = halo;
+  ctx.fillRect(mx - 160, my - 160, 320, 320);
+  ctx.fillStyle = 'rgba(196,206,196,0.35)';
+  ctx.beginPath(); ctx.arc(mx, my, 32, 0, Math.PI * 2); ctx.fill();
+
+  // the breakwater: a low black wall with lamps still burning along it
+  ctx.fillStyle = '#030607';
+  ctx.fillRect(0, horizon - 16, W, 18);
+  for (let x = 20; x < W; x += 132) {
+    ctx.fillStyle = '#050a0b';
+    ctx.fillRect(x, horizon - 30, 5, 16);
+    ctx.fillStyle = 'rgba(232,196,120,0.30)';
+    ctx.beginPath(); ctx.arc(x + 2.5, horizon - 32, 3.5, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // the water, and the lamps smeared down it
+  const sea = ctx.createLinearGradient(0, horizon, 0, H);
+  sea.addColorStop(0, '#061013');
+  sea.addColorStop(1, '#03080a');
+  ctx.fillStyle = sea;
+  ctx.fillRect(0, horizon, W, H - horizon);
+  for (let x = 20; x < W; x += 132) {
+    ctx.fillStyle = 'rgba(232,196,120,0.05)';
+    ctx.fillRect(x, horizon, 5, Math.round((H - horizon) * 0.30));
+  }
+  ctx.strokeStyle = 'rgba(120,180,160,0.06)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 24; i++) {
+    const y = horizon + 6 + r() * (H - horizon - 12);
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    for (let x = 0; x <= W; x += 44) ctx.lineTo(x, y + Math.sin((x + i * 70) * 0.012) * 2.5);
+    ctx.stroke();
+  }
+  bdTex.needsUpdate = true;
+}
+place(backdrop, function () {
+  this.setRect(0, 0, engine.width, engine.height);
+  bdQuad.setRect(0, 0, engine.width, engine.height);
+  paintBackdrop();
+});
+backdrop.on('dispose', () => bdTex.dispose());
+engine.layers.background.add(backdrop);
+
+// ---- the range: the world receives fire (clicks that miss chrome land here) ----
+const range = new UINode({ name: 'the-range', interactive: true });
+// the world is not chrome — press feedback is the reticle's bloom and the
+// muzzle's voice, hover is the pan itself (deliberately silent surface).
+// (Its auditAllow('hover','press') is gone: the states walker only targets nodes
+// with a pointerenter listener — src/torture.js — and the range registers none,
+// so the declaration was inert; walker allowances never count toward ALLOW either.)
+place(range, function () { this.setRect(0, 0, engine.width, engine.height); });
+engine.layers.background.add(range);
+let lockDenied = false; // a host that refuses pointer lock is asked exactly once
+range.on('pointerdown', (e) => {
+  if ((e.button ?? 0) !== 0) return;
+  if (wheelGate) return; // the press that closed the wheel is not a trigger pull
+  sim.idleT = 0;
+  // the first click takes the watch: pointer lock = true mouse-look (Esc releases);
+  // the same press also fires — locking never eats a shot. A host can refuse the
+  // lock on EITHER channel: some throw synchronously, and
+  // Chrome 105+ returns a promise that headless REJECTS instead
+  // (WrongDocumentError — caught by the input replay; try/catch never sees a
+  // rejection, so the old guard still stamped ERROR@ through unhandledrejection).
+  // Both denials degrade to the absolute map: stop asking, drop the hint.
+  if (!INSTRUMENTED && !lockDenied && document.pointerLockElement !== engine.canvas) {
+    const denied = () => { lockDenied = true; lockHint.visible = false; };
+    try { engine.canvas.requestPointerLock?.()?.catch?.(denied); }
+    catch { denied(); }
+  }
+  fireOnce();
+});
+
+// ---- the enemies: four POOLED plates on the cylindrical window ----
+const anchors = new WorldAnchorLayer({ project });
+engine.layers.background.add(anchors);
+const ENEMY_SEED = [
+  { name: 'Pale Diver', bearing: 292, dist: 260, drift: 4.0, weapon: 'arrows' },
+  { name: 'Deep Hybrid', bearing: 316, dist: 340, drift: -3.2, weapon: 'fireball' },
+  { name: 'Choir-Unbound', bearing: 338, dist: 300, drift: 2.6, weapon: 'deathkiss' },
+  { name: 'Quarry-of-Salt', bearing: 357, dist: 440, drift: -4.6, weapon: 'book' },
+];
+function makeEnemy(seed, i) {
+  const plate = new UINode(); // NOT interactive: fire resolves through the raycast
+  const bg = new NineSliceNode(engine.textures.frame('tooltip.frame'));
+  const label = new TextNode(seed.name, {
+    font: FONTS.header, size: 12, smallCaps: true, letterSpacing: 1, color: COLORS.bone, shadow,
+  });
+  const bar = new SegmentedBar({ segments: 4, value: 4, max: 4, width: 108, height: 14 });
+  const w = Math.max(Math.ceil(label.w) + 24, 132);
+  plate.add(bg, label, bar);
+  bg.setRect(0, 0, w, 48);
+  label.setPos(12, 6);
+  bar.setPos(12, 26);
+  plate.setSize(w, 48);
+  const spot = { x: seed.bearing, y: 0, z: seed.dist };
+  anchors.anchor(plate, spot, { dy: -24 });
+  return {
+    ...seed, i, plate, bar, spot,
+    hp: 4, hpMax: 4, alive: true, respawnT: 0,
+  };
+}
+sim.enemies = ENEMY_SEED.map(makeEnemy);
+const livingE = () => sim.enemies.filter((e) => e.alive);
+
+// ---- the compass: the tape IS the yaw (reuse, finally moving) ----
+const compass = new CompassStrip({
+  width: 360, heading: 320,
+  markers: [{ bearing: 305, color: COLORS.quest }, { bearing: 40, color: COLORS.negative }],
+});
+place(compass, function () { this.setPos(Math.round((engine.width - this.w) / 2), 14); });
+engine.layers.overlay.add(compass);
+
+// ---- the sights ----
+const reticle = new Reticle({ style: 'cross', spread: 8 });
+place(reticle, function () {
+  this.setPos(Math.round((engine.width - this.w) / 2), Math.round((engine.height - this.h) / 2));
+});
+engine.layers.overlay.add(reticle);
+const markers = new HitMarker({ pool: 8 });
+place(markers, function () {
+  this.setPos(Math.round(engine.width / 2), Math.round(engine.height / 2));
+});
+engine.layers.overlay.add(markers);
+const ring = new DamageIndicator({ radius: 96 });
+place(ring, function () {
+  this.setPos(Math.round((engine.width - this.w) / 2), Math.round((engine.height - this.h) / 2));
+});
+engine.layers.overlay.add(ring);
+
+// ---- the ammunition ----
+const ammo = new AmmoCounter({ mag: 7, magSize: 12, reserve: 24 });
+place(ammo, function () { this.setPos(engine.width - this.w - 36, engine.height - this.h - 30); });
+engine.layers.overlay.add(ammo);
+
+// ---- the feed ----
+const feed = new Killfeed({ maxRows: 6, ttl: FROZEN ? 9999 : 7 });
+place(feed, function () { this.setPos(engine.width - this.w - 24, 56); });
+engine.layers.overlay.add(feed);
+// the frozen shot pins three rows (a huge TTL keeps them bit-stable); the live
+// page seeds the same three so the feed never boots empty
+feed.push({ killer: 'Warden-of-Salt', weapon: 'arrows', victim: 'Pale Diver' });
+feed.push({ killer: 'You', weapon: 'fireball', victim: 'Deep Hybrid', self: true });
+feed.push({ killer: 'Choir-Unbound', weapon: 'deathkiss', victim: 'Lampless One' });
+
+// ---- the score ----
+const scoreText = new TextNode('Score: 0', {
+  font: FONTS.header, size: 14, smallCaps: true, letterSpacing: 1, color: COLORS.accent, shadow,
+});
+place(scoreText, function () { this.setPos(36, 18); });
+engine.layers.overlay.add(scoreText);
+function addScore(n) {
+  sim.score = Math.max(0, sim.score + n);
+  scoreText.setText(`Score: ${sim.score}`);
+}
+
+// the watch hint: how to take true mouse-look (hidden while locked; never on
+// instrumented boots — the census and the frozen shot see the clean hud)
+const lockHint = new TextNode('click to take the watch — Esc releases', {
+  size: 11, color: COLORS.textMuted, shadow,
+});
+lockHint.visible = !INSTRUMENTED;
+place(lockHint, function () {
+  this.setPos(Math.round((engine.width - this.w) / 2), Math.round(engine.height / 2) + 52);
+});
+engine.layers.overlay.add(lockHint);
+
+// ---- armor / ward: DRIVEN vitals ----
+const vitals = new UINode({ name: 'vitals' });
+const armorLabel = new TextNode('Armor', {
+  font: FONTS.header, size: 11, smallCaps: true, letterSpacing: 2, color: COLORS.textMuted, shadow,
+});
+const armorBar = new SegmentedBar({ segments: 4, value: 4, max: 4, width: 180, height: 14 });
+const shieldLabel = new TextNode('Ward', {
+  font: FONTS.header, size: 11, smallCaps: true, letterSpacing: 2, color: COLORS.textMuted, shadow,
+});
+const shieldBar = new SegmentedBar({ segments: 3, value: 3, max: 3, width: 180, height: 14 });
+vitals.add(armorLabel, armorBar, shieldLabel, shieldBar);
+armorLabel.setPos(0, 0);
+armorBar.setPos(0, 16);
+shieldLabel.setPos(0, 40);
+shieldBar.setPos(0, 56);
+vitals.setSize(180, 74);
+place(vitals, function () { this.setPos(36, engine.height - this.h - 30); });
+engine.layers.overlay.add(vitals);
+
+// ---- the capture point ----
+const point = new UINode({ name: 'capture' });
+const pointFrame = new NineSliceNode(engine.textures.frame('tooltip.frame'));
+const pointLabel = new TextNode('The Drowned Chapel', {
+  font: FONTS.header, size: 12, smallCaps: true, letterSpacing: 1, color: COLORS.bone, shadow,
+});
+const pointBar = new SegmentedBar({ segments: 10, value: 6, max: 10, width: 200, height: 14 });
+point.add(pointFrame, pointLabel, pointBar);
+pointFrame.setRect(0, 0, 224, 58);
+pointLabel.setPos(Math.round((224 - pointLabel.w) / 2), 8);
+pointBar.setPos(12, 32);
+point.setSize(224, 58);
+place(point, function () { this.setPos(Math.round((engine.width - this.w) / 2), 58); });
+engine.layers.overlay.add(point);
+
+// ---- the combat verbs (model first; the widgets narrate) ----
+const voice = (kind) => engine.bus.emit('uisound', { kind, node: null, data: {} });
+function aimAt(bearing) {
+  sim.yaw = norm(bearing);
+  compass.setHeading(sim.yaw, { animate: false }); // the per-frame path: the tape IS the yaw
+}
+function nearestUnderReticle() {
+  let best = null, bestAbs = Infinity;
+  for (const e of livingE()) {
+    const px = Math.abs(relOf(e.bearing)) * PXD;
+    if (px < 14 + reticle.spread / 2 && px < bestAbs) { best = e; bestAbs = px; }
+  }
+  return best;
+}
+function fireOnce() {
+  const had = ammo.mag > 0;
+  ammo.fire();
+  reticle.setSpread(Math.min(26, reticle.spread + 6));
+  if (!had) return null;
+  const target = nearestUnderReticle();
+  if (!target) return null; // a miss is honest: bloom and the report, nothing else
+  target.hp -= 1;
+  target.bar.setValue(target.hp);
+  const p = project(target.bearing, 0, target.dist);
+  markers.spawn(Math.round(p.sx - engine.width / 2), Math.round(p.sy - engine.height / 2 - 12),
+    { kill: target.hp === 0 });
+  reticle.flash(target.hp === 0 ? 'kill' : 'hit');
+  if (target.hp === 0) slay(target);
+  return target;
+}
+function slay(e) {
+  e.alive = false;
+  e.respawnT = 4 + e.i;
+  feed.push({ killer: 'You', weapon: e.weapon, victim: e.name, self: true });
+  addScore(100);
+  if (!INSTRUMENTED && !Eldritch.reducedMotion) {
+    engine.ticker.tween(e.plate, { fxOpacity: 0 }, { dur: 0.4 });
+  } else e.plate.fxOpacity = 0; // cull rides fxOpacity — the anchor layer OWNS visible
+}
+function respawn(e) {
+  e.alive = true;
+  e.hp = e.hpMax;
+  e.bearing = norm(e.bearing + 67 + e.i * 23); // a fresh approach, deterministic
+  e.spot.x = e.bearing;
+  e.bar.setValue(e.hpMax, { animate: false });
+  e.plate.fxOpacity = 1;
+}
+function damagePlayer(n) {
+  sim.quietT = 0;
+  for (let k = 0; k < n; k++) {
+    if (sim.shield > 0) { sim.shield -= 1; shieldBar.setValue(sim.shield); }
+    else { sim.armor -= 1; armorBar.setValue(Math.max(0, sim.armor)); }
+  }
+  voice('error');
+  if (sim.armor <= 0) downed();
+}
+function enemyShot(i) {
+  const pool = livingE();
+  if (!pool.length) return;
+  const e = pool[i % pool.length];
+  ring.hit(norm(relOf(e.bearing)));
+  damagePlayer(1);
+}
+function downed() {
+  const by = livingE()[0];
+  feed.push({ killer: by ? by.name : 'The Tide', weapon: by ? by.weapon : 'arrows', victim: 'You' });
+  TitleCard.show({ title: 'The Watch Endures', subtitle: 'The line reforms', hold: 1.2 });
+  addScore(-250);
+  sim.shield = sim.shieldMax; sim.armor = sim.armorMax; sim.quietT = 0;
+  shieldBar.setValue(sim.shield, { animate: false });
+  armorBar.setValue(sim.armor, { animate: false });
+}
+function chapelHeld() {
+  TitleCard.show({ title: 'The Chapel Is Held', hold: 1.1 });
+  addScore(500);
+  feed.push({ killer: 'Warden-of-Salt', weapon: 'arrows', victim: 'Pale Diver' });
+  sim.point = 0.15;
+  sim.waveSpeed += 0.15; // the tide answers harder
+}
+
+// ---- the sim step (drivable by the suite; the live ticker just calls it) ----
+function simStep(dt) {
+  // drift and respawns
+  for (const e of sim.enemies) {
+    if (e.alive) { e.bearing = norm(e.bearing + e.drift * dt * sim.waveSpeed); e.spot.x = e.bearing; }
+    else { e.respawnT -= dt; if (e.respawnT <= 0) respawn(e); }
+  }
+  // the answering ladder (deterministic cadence)
+  if (sim.combat) {
+    sim.fireT += dt;
+    const interval = Math.max(1.2, 2.0 + 0.2 * (sim.ladder % 4) - (sim.waveSpeed - 1));
+    if (sim.fireT >= interval && livingE().length) {
+      sim.fireT = 0;
+      enemyShot(sim.ladder);
+      sim.ladder += 1;
+    }
+  }
+  // ward regen: 3 quiet seconds, then a pip per 0.8s
+  sim.quietT += dt;
+  if (sim.quietT > 3 && sim.shield < sim.shieldMax) {
+    sim.regenT += dt;
+    if (sim.regenT >= 0.8) { sim.regenT = 0; sim.shield += 1; shieldBar.setValue(sim.shield); }
+  } else if (sim.quietT <= 3) sim.regenT = 0;
+  // the hold: keep the chapel centered and the point charges
+  if (sim.phase === 'hold') {
+    const rel = relOf(305);
+    const before = sim.point;
+    if (Math.abs(rel) <= 15) sim.point = Math.min(1, sim.point + dt / 8);
+    else sim.point = Math.max(0, sim.point - dt / 16);
+    if (sim.point !== before) pointBar.setValue(sim.point * 10);
+    if (sim.point >= 1) chapelHeld();
+  }
+}
+
+// ---- controls: pointer-lock mouse-look (click to take the watch), click/Space
+// fires, R reloads. Unlocked, the absolute map covers the FULL ring (±180 across
+// the screen) so every bearing is reachable before the first click. ----
+let firing = false;
+const LOCK_SENS = 0.22; // degrees per locked mouse px
+const locked = () => document.pointerLockElement === engine.canvas;
+if (!INSTRUMENTED) {
+  // gated: the walkers storm pointer events — an instrumented boot must not pan
+  engine.bus.on('pointermove', (e) => {
+    if (ground.isOpen) return; // while the wheel stands, the mouse PICKS — it does not pan
+    sim.idleT = 0;
+    if (locked()) {
+      // true mouse-look: unbounded turning on relative movement
+      sim.yaw = norm(sim.yaw + (e.native?.movementX ?? 0) * LOCK_SENS);
+    } else {
+      sim.lastMx = e.x;
+      sim.yaw = norm(sim.baseYaw + ((e.x - engine.width / 2) / engine.width) * 360);
+    }
+    compass.setHeading(sim.yaw, { animate: false });
+  });
+  // A document listener outlives the engine, so it is released on teardown like
+  // any other subscription — a flagship gets copied, and "add and forget" is the
+  // habit that leaks a whole page's worth of handlers in an SPA remount.
+  const onLockChange = () => {
+    lockHint.visible = !locked();
+    if (!locked() && sim.lastMx != null) {
+      // hand the absolute map back without a snap: re-derive its base from the
+      // yaw the lock left us at
+      sim.baseYaw = norm(sim.yaw - ((sim.lastMx - engine.width / 2) / engine.width) * 360);
+    }
+  };
+  document.addEventListener('pointerlockchange', onLockChange);
+  window.addEventListener('pagehide', () => document.removeEventListener('pointerlockchange', onLockChange), { once: true });
+}
+// Eldritch.onKey, never window.addEventListener: `down` is deaf while a text field holds
+// focus, and `up` fires only for a key this registration saw go down — so Space cannot
+// strand the trigger held down after a click elsewhere.
+Eldritch.onKey(' ', {
+  down: () => { sim.idleT = 0; firing = true; },
+  up: () => { firing = false; },
+});
+Eldritch.onKey('r', { down: () => { sim.idleT = 0; ammo.reload(1.1); }, repeat: true });
+
+// ---- the ground circle: the right button is FREE here (left fires and
+// takes the watch), so right-click opens the sight wheel. The full-screen range
+// owns every press, so this rides the widget's OWN rightclick channel, not the
+// bus-null path — and while the pointer is LOCKED the client coordinates are
+// frozen, so the circle opens at the screen centre where the reticle lives.
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'sight', label: 'Sight', children: [
+ { id: 'cross', label: 'Cross' },
+ { id: 'circle', label: 'Circle' },
+ { id: 'dot', label: 'Dot' },
+ { id: 'chevron', label: 'Chevron' },
+ ] },
+ { id: 'reload', label: 'Reload' },
+ ],
+});
+ground.on('select', ({ id, path }) => {
+  sim.idleT = 0;
+  if (path[0] === 'sight') reticle.setStyle(id);
+  else if (id === 'reload') ammo.reload(1.1);
+});
+range.on('rightclick', (e) => {
+  // the page CLAIMS the gesture: it computes lock-centered coordinates
+  // the radial chain cannot — and an unclaimed toggle would fight the chain's
+  // ground fallback (close, then instantly reopen)
+  e.preventDefault();
+  const locked = document.pointerLockElement === engine.canvas;
+  ground.toggle(locked ? engine.width / 2 : e.x, locked ? engine.height / 2 : e.y);
+});
+
+// ---- the wheel UNHANDS the mouse (the report, verbatim: "opening the radial
+// should stop hijacking the mouse for the shooter stuff; closing the radial
+// should put it back into shooter mode"). Opening under lock EXITS pointer lock
+// so the freed mouse picks sectors like anywhere else; closing re-arms the
+// watch. A select/outside-press close carries real user activation, so the
+// re-lock lands; an Escape close may not — then the standing lockHint and the
+// next left click re-engage (the existing flow). The re-lock denial is SOFT:
+// a cooldown refusal is not a host refusal, so lockDenied stays untouched.
+let relockArmed = false;
+let wheelGate = false; // the press that closes the wheel must not fire the rifle
+ground.on('open', () => {
+  if (!INSTRUMENTED && document.pointerLockElement === engine.canvas) {
+    relockArmed = true;
+    try { document.exitPointerLock?.(); } catch { /* headless: nothing held the lock */ }
+  }
+});
+ground.on('close', () => {
+  wheelGate = true;
+  queueMicrotask(() => { wheelGate = false; }); // same-dispatch guard — no timer, no clock
+  const wasArmed = relockArmed;
+  relockArmed = false;
+  if (wasArmed && sim.lastMx != null) {
+    // hand the absolute map back without a snap (the onLockChange law)
+    sim.baseYaw = norm(sim.yaw - ((sim.lastMx - engine.width / 2) / engine.width) * 360);
+  }
+  if (wasArmed && !INSTRUMENTED && !lockDenied && document.pointerLockElement !== engine.canvas) {
+    try { engine.canvas.requestPointerLock?.()?.catch?.(() => {}); } catch { /* soft: the hint stands */ }
+  }
+});
+
+// the Fire / Reload / Sight buttons are GONE. Fire and Reload were
+// pure duplicates of input the page already had - `range` fires on left-click (and
+// takes pointer lock with the same press) and Space/R are bound above - so a first
+// person HUD was carrying a column of buttons for things the mouse already does.
+// Sight cycling is a real affordance, but it belongs on a key with a legend beside
+// it, not parked on the HUD as a widget.
+function cycleSight() {
+  const order = ['cross', 'circle', 'dot', 'chevron'];
+  reticle.setStyle(order[(order.indexOf(reticle.style) + 1) % order.length]);
+}
+Eldritch.onKey('v', { down: () => { sim.idleT = 0; cycleSight(); } });
+
+// ---- the watch's own bindings, shown as a legend ----
+const legend = new UINode({ name: 'bindings' });
+const legendRows = [
+  new InputPrompt({ mouse: 1, pad: 'RT' }, 'Fire — the first press takes the watch'),
+  new InputPrompt({ key: 'R', pad: 'X' }, 'Reload'),
+  new InputPrompt({ key: 'V', pad: 'Y' }, 'Cycle the sight'),
+];
+legendRows.forEach((row, i) => { row.setPos(0, i * 24); legend.add(row); });
+legend.setSize(280, legendRows.length * 24);
+// stacked ABOVE the vitals with a real gap, derived from where vitals actually sits
+// (a guessed constant put it 8px into the armor rail - one overlap violation)
+place(legend, function () { this.setPos(36, engine.height - vitals.h - 30 - this.h - 16); });
+engine.layers.overlay.add(legend);
+
+// ---- the live watch: beats, bursts, the autopilot ----
+// A NAMED function, not a closure inside the test suite: the INSTRUMENTED blind spot
+// (item 2) is that the live path is the one path no instrument walks — so
+// the ?assert suite drives THIS body by hand with a chosen dt, while live boots
+// tick it from the engine. The gate stays on the REGISTRATION, so census and
+// frozen boots still never advance the watch.
+let burstT = 0, showedWatch = false, showedHold = false;
+function liveTick(dt) {
+  sim.t += dt;
+  // the opening beats
+  if (!showedWatch && sim.t >= 1.0) {
+    showedWatch = true;
+    TitleCard.show({ title: 'The Harbor Watch', subtitle: 'The tide brings shapes', hold: 1.2 });
+  }
+  if (sim.t >= 1.5) sim.combat = true;
+  if (!showedHold && sim.t >= 6) {
+    showedHold = true;
+    sim.phase = 'hold';
+    TitleCard.show({ title: 'Hold the Drowned Chapel', subtitle: 'Keep its marker centered', hold: 1.4 });
+  }
+  // held Space: the burst cadence
+  if (firing) {
+    burstT += dt;
+    if (burstT > 0.12) { burstT = 0; fireOnce(); }
+  } else {
+    reticle.setSpread(Math.max(8, reticle.spread - 40 * dt));
+  }
+  // the dry mag never wedges the demo
+  if (ammo.mag === 0 && !ammo.isReloading) {
+    sim.dryT = (sim.dryT ?? 0) + dt;
+    if (sim.dryT > 1.5) { sim.dryT = 0; ammo.reload(1.1); }
+  } else sim.dryT = 0;
+  // the autopilot: four idle seconds hand over the watch
+  sim.idleT += dt;
+  if (sim.idleT > 4) {
+    const want = (sim.phase === 'hold' && sim.point < 1) ? 305
+      : (livingE().sort((a, b) => Math.abs(relOf(a.bearing)) - Math.abs(relOf(b.bearing)))[0]?.bearing ?? 305);
+    const delta = ((want - sim.yaw + 540) % 360) - 180;
+    const stepD = Math.max(-50 * dt, Math.min(50 * dt, delta));
+    sim.yaw = norm(sim.yaw + stepD);
+    if (sim.lastMx != null) sim.baseYaw = norm(sim.yaw - ((sim.lastMx - engine.width / 2) / engine.width) * 360);
+    compass.setHeading(sim.yaw, { animate: false });
+    sim.autoT += dt;
+    if (Math.abs(delta) < 5 && sim.autoT > 0.3) { sim.autoT = 0; fireOnce(); }
+  }
+  simStep(dt);
+}
+engine.ticker.add((dt) => { if (!INSTRUMENTED) liveTick(dt); });
+// `firing` is module-local and the burst loop that reads it is gated above, so
+// without the getter the trigger state is unobservable from the suite; `tick`
+// is the live body itself for the autopilot/burst probes.
+window.__shooter = { sim, aimAt, fireOnce, enemyShot, simStep, relOf, project,
+  tick: liveTick, get firing() { return firing; }, reticle, ammo,
+  ground, relockArmed: () => relockArmed, wheelOpen: () => ground.isOpen,
+  style: () => reticle.style };
+
+// ---- READY / ASSERT ----
+if (!ASSERT) {
+  setTimeout(() => {
+    document.title = window.__errs.length ? 'SHOOTERHUD BOOT FAIL: ' + window.__errs[0] : 'SHOOTERHUD READY';
+  }, 1000);
+} else {
+  (async () => {
+    const results = [];
+    let fails = 0;
+    const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    await wait(400); // settle the boot
+    Eldritch.reducedMotion = true; // deterministic: sweeps land instantly, pops park
+
+    ok('boot: the hud stands (sights, ammo, ring, feed, vitals, point, four shapes)',
+      window.__errs.length === 0 && reticle.spread === 8 && ammo.mag === 7
+      && feed.liveCount === 3 && ring.lastBearing === null
+      && livingE().length === 4 && sim.score === 0 && sim.shield === 3 && sim.armor === 4);
+
+    // ---- spread math: the bloom is pure quad offset ----
+    reticle.setSpread(24);
+    const c = reticle._size / 2;
+    ok('spread: arms sit exactly at gap 4 + spread 24',
+      reticle._arms[0].y === Math.round(c - 28 - reticle._armLen)
+      && reticle._arms[3].x === Math.round(c + 28));
+    const held = reticle.spread;
+    reticle.setSpread(NaN);
+    ok('spread: NaN keeps the last spread (the nanmax law)', reticle.spread === held);
+    reticle.setSpread(-10);
+    ok('spread: negatives clamp to zero', reticle.spread === 0);
+    reticle.setSpread(8);
+
+    // ---- style swap: the chevron drops its vertical arms ----
+    reticle.setStyle('chevron');
+    ok('style: the chevron keeps side arms only',
+      reticle._arms[0].visible === false && reticle._arms[2].visible === true);
+    reticle.setStyle('cross');
+    ok('style: the cross restores all four arms', reticle._arms[0].visible === true);
+
+    // ---- flash: a feedback hold that survives reducedMotion ----
+    reticle.flash('kill');
+    ok('flash: the sight reads blood while the hold stands', reticle._flashOff !== null);
+    await wait(320);
+    ok('flash: the hold releases and the tint restores', reticle._flashOff === null);
+
+    // ---- the marker pool: steal-the-oldest, never allocate ----
+    const pool4 = new HitMarker({ pool: 4 });
+    pool4.setPos(300, 300);
+    engine.layers.overlay.add(pool4);
+    for (let i = 0; i < 6; i++) pool4.spawn(i * 4, 0, { kill: i === 5 });
+    ok('markers: six spawns into a pool of four steal the oldest (live holds at 4)',
+      pool4.liveCount === 4);
+    await wait(1100);
+    ok('markers: every flash faded back to the pool', pool4.liveCount === 0 && pool4._pool.length === 4);
+    pool4.dispose();
+
+    // ---- ammo: the threshold commits once, the dry trigger refuses ----
+    const lows = [];
+    const reloads = [];
+    ammo.on('lowammo', (e) => lows.push(e.mag));
+    ammo.on('reloaded', (e) => reloads.push(e)); // the whole payload: pins the verb too
+    ammo.setAmmo(5, 24);
+    ammo.fire(); // 4
+    ammo.fire(); // 3 -> threshold (ceil(12*0.25)=3): ONE lowammo
+    ammo.fire(); // 2 -> no repeat
+    ok('ammo: the low warning committed exactly once at the crossing',
+      lows.length === 1 && lows[0] === 3 && ammo.mag === 2);
+    ammo.fire(); ammo.fire(); ammo.fire(); // 1, 0, dry
+    ok('ammo: the dry trigger fires nothing below zero', ammo.mag === 0);
+    ammo.reload(0.4); // reducedMotion: lands instantly
+    // the verb joins the pin — action:'reload' was restored to
+    // match the typings and neither reload assert ever read it (deleting the
+    // field stayed green)
+    ok('ammo: the reload seats a full mag from the reserve and speaks once with the verb',
+      ammo.mag === 12 && ammo.reserve === 12 && reloads.length === 1
+      && reloads[0].mag === 12 && reloads[0].action === 'reload' && ammo.isReloading === false);
+    ammo.setAmmo(NaN, NaN);
+    ok('ammo: NaN sets keep the seated numbers', ammo.mag === 12 && ammo.reserve === 12);
+
+    // ---- the ground circle: right-click on the range opens the sight
+    // wheel at the cursor (unlocked — no pointer lock under the suite), and a
+    // nested Sight pick drives the reticle through its own setStyle verb ----
+    range.dispatch('rightclick', { x: 500, y: 300 });
+    await wait(60);
+    ok('ground: a right-click on the range opens the sight wheel at the cursor',
+      ground.isOpen === true && Math.round(ground.x + ground.rOut) === 500);
+    ground._setIndex(0, false); // Sight
+    ground.onActivate();
+    await wait(40);
+    ground._setIndex(2, false); // Dot
+    ground.onActivate();
+    await wait(40);
+    ok('ground: the nested Dot pick re-inks the reticle through setStyle',
+      ground.isOpen === false && reticle.style === 'dot');
+    reticle.setStyle('cross'); // restore the boot sight for anything below
+
+    // ---- the wheel unhands the mouse — the page-level contracts the
+    // suite CAN see headless (the true lock cycle is the browser's; the input replay
+    // proves the denial class and the verbs under real input) ----
+    {
+      const opens = [], closes = [];
+      ground.on('open', (e) => opens.push(e));
+      ground.on('close', (e) => closes.push(e));
+      ground.open(500, 300, { silent: true });
+      await wait(40);
+      ground.close({ silent: true });
+      await wait(40);
+      ok('wheel: open/close narrate — the page hooks the unhand/re-arm cycle on them',
+        opens.length === 1 && opens[0].x === 500 && closes.length === 1);
+      ok('wheel: an unlocked cycle never arms the re-lock (headless truth)',
+        window.__shooter.relockArmed() === false);
+      // the closing press is NOT a trigger pull: the close sets the same-dispatch
+      // gate, so a pointerdown in that dispatch leaves the mag alone; the next
+      // press (a fresh dispatch) fires
+      const mag0 = ammo.mag;
+      ground.open(500, 300, { silent: true });
+      ground.close({ silent: true });
+      range.dispatch('pointerdown', { x: 500, y: 300, button: 0 });
+      const heldFire = ammo.mag === mag0;
+      await wait(40); // the microtask gate has long cleared
+      range.dispatch('pointerdown', { x: 500, y: 300, button: 0 });
+      ok('wheel: the closing press holds its fire; the next press shoots',
+        heldFire && ammo.mag === mag0 - 1);
+      ok('wheel: the range CLAIMS its right-click (the chain stays out of the firefight)',
+        range.dispatch('rightclick', { x: 500, y: 300 }).defaultPrevented === true
+        && (ground.close({ silent: true }), true));
+      await wait(40);
+    }
+
+    // ---- the ring: bearings map the compass rose, behind included ----
+    ring.hit(180);
+    ok('ring: behind lands at the bottom (bearing 180 held)', ring.lastBearing === 180 && ring._fade === 1);
+    ring.hit(-90);
+    ok('ring: negative bearings wrap (270 = hard left)', ring.lastBearing === 270);
+    ring.hit(NaN);
+    ok('ring: a NaN bearing reads as ahead (0)', ring.lastBearing === 0);
+
+    // ---- the feed: cap eviction, TTL return, self film ----
+    for (let i = 0; i < 8; i++) feed.push({ killer: `K${i}`, weapon: 'arrows', victim: `V${i}`, self: i === 7 });
+    ok('feed: eight pushes into six rows evict the oldest (live holds at max)',
+      feed.liveCount === 6);
+    ok('feed: the newest row sits on top', feed._live[0].y === 0);
+    const fastFeed = new Killfeed({ maxRows: 3, ttl: 0.6 });
+    fastFeed.setPos(60, 300);
+    engine.layers.overlay.add(fastFeed);
+    fastFeed.push({ killer: 'A', weapon: 'arrows', victim: 'B' });
+    ok('feed: a fresh row lives', fastFeed.liveCount === 1);
+    await wait(1400);
+    ok('feed: the TTL faded it back to the pool', fastFeed.liveCount === 0 && fastFeed._pool.length === 3);
+    fastFeed.dispose();
+
+    // ---- the aim: yaw commits, the compass reads it the same frame ----
+    aimAt(40);
+    ok('aim: yaw commits and the compass readout is instant',
+      sim.yaw === 40 && compass.heading === 40 && compass.readout._text === '40°');
+    // the widget-level slide law on the live fixture
+    aimAt(350);
+    compass.setHeading(10, { silent: true }); // the tweened path (animate default)
+    ok('aim: the tape slides the SHORT arc through north (unwrapped display)',
+      compass.heading === 10);
+    compass.setHeading(NaN);
+    ok('aim: a NaN heading keeps the last (the nanmax law)', compass.heading === 10);
+
+    // ---- fire: a hit lands ON the enemy; a miss blooms and nothing else ----
+    // Aim a hair OFF the bearing, still inside the spread window: the old form
+    // aimed dead-on, which put the enemy's projection exactly at screen center —
+    // the one configuration where a marker hard-wired to (0,0) passed a "not
+    // screen center" read. Off-axis, the stamp asserts compare BOTH axes to the
+    // live projection: x rides rel*PXD and y rides the distance row, and neither
+    // of those is the reticle's, so a center-wired marker flips both.
+    const mark = sim.enemies[0];
+    reticle.setSpread(24); // widen the hit window honestly: 14 + spread/2 = 26px, about 2.9 degrees
+    aimAt(norm(mark.bearing - 2.4)); // rel = +2.4 degrees -> ~22px right of center
+    const hpB = mark.hp, spreadB = reticle.spread;
+    const hit = fireOnce();
+    const pp = project(mark.bearing, 0, mark.dist);
+    const liveMark = markers._live?.[markers._live.length - 1] ?? null;
+    ok('fire: the shape under the sights takes the hit and the sight blooms',
+      hit === mark && mark.hp === hpB - 1 && reticle.spread > spreadB);
+    ok('fire: the marker stamps AT the enemy projection — both axes, measured off-center',
+      markers.liveCount >= 1 && liveMark !== null
+      && Math.abs(pp.sx - engine.width / 2) > 12
+      && Math.abs((markers.x + liveMark.x + liveMark.w / 2) - pp.sx) <= 3
+      && Math.abs((markers.y + liveMark.y + liveMark.h / 2) - (pp.sy - 12)) <= 3);
+    aimAt(norm(mark.bearing + 30));
+    const missed = fireOnce();
+    ok('fire: an off-aim shot is an honest miss (bloom only)',
+      missed === null && mark.hp === hpB - 1);
+
+    // ---- the kill chain: feed, score, the fading plate, the pooled respawn ----
+    aimAt(mark.bearing);
+    while (mark.alive) fireOnce();
+    ok('kill: the feed takes the self row, the score pays, the plate fades',
+      sim.score === 100 && feed._live[0] != null && mark.alive === false && mark.plate.fxOpacity === 0);
+    const plates = sim.enemies.map((e) => e.plate);
+    simStep(5); // past respawnT for enemy 0
+    ok('kill: the pool respawns the SAME plate at a fresh approach (no allocation)',
+      mark.alive === true && mark.hp === mark.hpMax && sim.enemies[0].plate === plates[0]
+      && plates.every((p) => !p.disposed));
+
+    // ---- return fire: the ring lights the TRUE relative bearing; ward soaks ----
+    sim.combat = false; // the suite drives shots by hand
+    aimAt(0);
+    const shooter = livingE()[1];
+    const expectedRel = norm(relOf(shooter.bearing));
+    const shieldB = sim.shield;
+    enemyShot(1);
+    ok('answer: the ring lights world-minus-yaw and the ward soaks first',
+      ring.lastBearing === expectedRel && sim.shield === shieldB - 1);
+
+    // ---- regen: three quiet seconds, then a pip per 0.8s; a hit resets the clock ----
+    const sB = sim.shield;
+    simStep(3.0); simStep(0.9);
+    ok('regen: the quiet window returns a ward pip', sim.shield === sB + 1);
+    simStep(2.9);
+    enemyShot(1);
+    const sB2 = sim.shield;
+    simStep(2.9);
+    ok('regen: a fresh hit resets the quiet clock (no pip inside the window)', sim.shield === sB2);
+
+    // ---- depletion order: ward to zero, then armor pays ----
+    while (sim.shield > 0) enemyShot(0);
+    const armorB = sim.armor;
+    enemyShot(0);
+    ok('order: an empty ward hands the debt to armor', sim.shield === 0 && sim.armor === armorB - 1);
+
+    // ---- the downed beat: armor zero reforms the line at a price ----
+    const scoreB = sim.score;
+    const debts = sim.armor; // fixed count: the LAST shot trips downed(), which resets
+    for (let k = 0; k < debts; k++) enemyShot(0);
+    ok('downed: the line reforms — vitals reset and the price is 250',
+      sim.armor === sim.armorMax && sim.shield === sim.shieldMax && sim.score === Math.max(0, scoreB - 250));
+
+    // ---- the hold: centered charges, away decays, held pays 500 and hardens ----
+    sim.phase = 'hold';
+    sim.point = 0.5;
+    aimAt(305);
+    simStep(2);
+    const chargedTo = sim.point;
+    ok('hold: the centered chapel charges the point', chargedTo > 0.5);
+    aimAt(90);
+    simStep(2);
+    ok('hold: looking away bleeds the point', sim.point < chargedTo);
+    aimAt(305);
+    sim.point = 0.99;
+    const waveB = sim.waveSpeed, scoreHold = sim.score;
+    simStep(1);
+    ok('hold: the held chapel pays 500 and the wave hardens',
+      sim.score === scoreHold + 500 && sim.waveSpeed > waveB && sim.point < 1);
+
+    // ---- the autopilot: four idle seconds hand over the watch ----
+    // liveTick is the LIVE body (beats, burst, autopilot) the INSTRUMENTED gate
+    // used to park where no instrument walks — the open item. The suite
+    // drives the exported tick by hand: idleT parked past the 4s threshold, and
+    // phase 'hold' with the point uncharged so the wanted mark is the chapel's
+    // fixed 305 (no dependence on drifted enemy bearings). Total driven time
+    // stays under 1.0s, so the opening beats and combat flag never trip.
+    sim.phase = 'hold';
+    sim.point = 0.5;
+    sim.idleT = 4.5;
+    sim.autoT = 0;
+    aimAt(norm(305 + 90)); // parked 90 degrees off the chapel
+    const d0 = Math.abs(relOf(305));
+    window.__shooter.tick(0.1);
+    window.__shooter.tick(0.1);
+    window.__shooter.tick(0.1);
+    const d1 = Math.abs(relOf(305));
+    // flips if the idle handover never engages (yaw holds still, autoT never runs)
+    ok('autopilot: the idle watch turns itself — yaw walks toward the mark under the 50°/s cap',
+      d1 < d0 && sim.autoT > 0);
+    // parked ON the mark, the trigger condition (|delta| < 5, autoT > 0.3) must fire
+    aimAt(305);
+    ammo.setAmmo(6, 12);
+    sim.idleT = 5;
+    sim.autoT = 1;
+    window.__shooter.tick(0.1);
+    ok('autopilot: parked on the mark it pulls the trigger by itself (the mag pays one)',
+      ammo.mag === 5);
+
+    // ---- hit-reach: chrome wins over the world; the sky is the range ----
+    const reach = (n) => {
+      const h = hitTest(engine, n.worldX + n.w / 2, n.worldY + n.h / 2);
+      return h === n || (n.isAncestorOf ? n.isAncestorOf(h) : false);
+    };
+    // The three verbs used to be BUTTONS, and this assert probed that they beat the
+    // world to a click. They are keys now (ruling 2), so the claim that matters
+    // is that the KEY PATH works - which is a stronger thing to pin than a button's
+    // hit rect, because it is the path a player actually uses.
+    // Through the ENGINE BUS, which is the contract Eldritch.onKey publishes. A raw
+    // window KeyboardEvent used to reach the page because the page listened on window —
+    // that is the bug this page was fixed FOR, so the suite must not keep testing the
+    // path that no longer exists. The focus gate itself (typing must not fire hotkeys)
+    // is pinned in the test suite, where a real TextField can hold focus.
+    const style0 = reticle.style;
+    engine.bus.emit('keydown', { key: 'v' });
+    await wait(40);
+    ok(`keys: V cycles the sight [${style0} -> ${reticle.style}]`, reticle.style !== style0);
+    ammo.setAmmo(4, 20);
+    engine.bus.emit('keydown', { key: 'r' });
+    await wait(1400);
+    ok(`keys: R seats a fresh mag from the reserve [${ammo.mag}/${ammo.reserve}]`,
+      ammo.mag > 4 && ammo.reserve < 20);
+    // Space rides the same door, and its UP half is the migration's whole point:
+    // a raw window listener could strand `firing` held after focus moved — the
+    // exact class/onKey exists to kill. The trigger state reads through the
+    // __shooter getter because the burst loop that consumes it is gated live-only.
+    engine.bus.emit('keydown', { key: ' ' });
+    ok('keys: Space down arms the trigger (bus -> Eldritch.onKey -> firing)',
+      window.__shooter.firing === true);
+    engine.bus.emit('keyup', { key: ' ' });
+    ok('keys: Space up releases the trigger — the hold can never strand',
+      window.__shooter.firing === false);
+    const errsB4Space = window.__errs.length;
+    engine.bus.emit('keyup', { key: ' ' });
+    ok('keys: a keyup that never saw its down is not ours to release (quiet no-op, no throw)',
+      window.__shooter.firing === false && window.__errs.length === errsB4Space);
+    ok('hit-reach: empty sky returns the range (the world receives fire)',
+      hitTest(engine, Math.round(engine.width * 0.31), Math.round(engine.height * 0.72)) === range);
+    // probe the ammo's UPPER band: the taskbar strip legitimately owns the lower
+    // lane it crosses — the claim is about the COUNTER, which never takes hits
+    const ammoHit = hitTest(engine, ammo.worldX + ammo.w / 2, ammo.worldY + 6);
+    ok('hit-reach: a point over the ammo counter falls THROUGH to the range (the hud never eats the world\'s clicks)',
+      ammoHit === range);
+
+    // ---- the construction budget: the whole kit bakes NOTHING into the atlas ----
+    const t0 = engine.textures.count;
+    const batch = [new Reticle({}), new HitMarker({}), new AmmoCounter({}), new DamageIndicator({}), new Killfeed({})];
+    ok('budget: five iron-sights widgets cost zero atlas textures', engine.textures.count === t0);
+    for (const w of batch) w.dispose();
+
+    // ---- NaN ctor laws ----
+    const nanR = new Reticle({ size: NaN, spread: NaN, armLength: NaN });
+    const nanA = new AmmoCounter({ mag: NaN, magSize: NaN, reserve: NaN, warnAt: NaN });
+    const nanD = new DamageIndicator({ radius: NaN, thickness: NaN, dur: NaN });
+    const nanF = new Killfeed({ maxRows: NaN, ttl: NaN, width: NaN });
+    ok('nan: every ctor guards to its defaults',
+      nanR._size === 56 && nanR.spread === 0 && nanA.magSize === 12 && nanA.mag === 12
+      && nanD.radius === 90 && nanF.maxRows === 6 && nanF.ttl === 6);
+    nanR.dispose(); nanA.dispose(); nanD.dispose(); nanF.dispose();
+
+    // the last word: __errs was read once at t=400ms (the boot assert) and never
+    // again. The pointer-lock request used to THROW uncaught in headless hosts
+    // (WrongDocumentError) on a live first click — wrapped now; this line is the
+    // tripwire that keeps that class, and every later throw, from passing green.
+    ok('close: no errors reached the console across the whole run', window.__errs.length === 0);
+
+    Eldritch.reducedMotion = false;
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;max-height:95vh;overflow:auto;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:10px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `SHOOTERHUD ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — The Reliquary</title>
+<!-- @demo   The Reliquary: bags, vendor, loot, currency, and the full item context menu on the stacking drag protocol.
+     @shows  ItemGrid, EldContextMenu, EldPopup, EldDragDrop, NumberField, EventLog, EldToast, RadialMenu
+     @params ?freeze=1 — bit-stable snapshot boot · ?assert=1 — the in-page suite titles its own PASS count -->
+
+<!-- The flagship (the page builds its first gated suite): bags, a sealed
+     chest, a vendor, a loot chest, currency, and a full item context menu (Use /
+     Split with a NumberField dialog / Sell / Discard) — all on the frozen
+     stacking engine, through public APIs only. The old floating caption died in
+     : right-click-for-rites is the inventory genre's own convention, and the
+     market window carries its one line of merchant voice inside its titled panel. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import {
+  Eldritch, EldWindow, EldPopup, EldContextMenu, EldToast, EldEvents, EldDragDrop, ItemGrid,
+  Button, NumberField, RadialMenu, UINode, QuadNode, NineSliceNode, TextNode, EventLog, ToggleLabel,
+  runAudit, hitTest, COLORS, FONTS, itemData, rarityColor,
+} from '../src/lovecraft-ui.js';
+
+Eldritch.registerItem('moss_poultice', {
+  name: 'Moss Poultice', desc: 'Churchyard herbs that knit flesh unnaturally fast.',
+  icon: 'leafs', rarity: 'common', stackMax: 10,
+});
+Eldritch.registerItem('bone_darts', {
+  name: 'Bone Darts', desc: 'Carved from things best left unnamed.',
+  icon: 'arrows', rarity: 'common', stackMax: 20,
+});
+Eldritch.registerItem('void_shard', {
+  name: 'Void Shard', desc: 'A splinter of the dark between the stars. It hums.',
+  icon: 'deathkiss', rarity: 'epic', stackMax: 5,
+});
+Eldritch.registerItem('sea_grimoire', {
+  name: 'Grimoire of the Deep', desc: 'Its pages are always damp.',
+  icon: 'book', rarity: 'rare', stackMax: 1,
+});
+Eldritch.registerItem('elder_sigil', {
+  name: 'Elder Sigil', desc: 'The one true ward. There is no second.',
+  icon: 'shield', rarity: 'legendary', stackMax: 1,
+});
+
+// prices in copper (100c = 1s, 100s = 1g); vendors buy at half
+const PRICES = { moss_poultice: 12, bone_darts: 4, void_shard: 900, sea_grimoire: 350, elder_sigil: 25000 };
+const USABLE = new Set(['moss_poultice']);
+
+// ?freeze=1 (verification aid): the -Snap baseline protocol — see demo.html
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+window.engine = engine;
+
+const HOUSE_SHADOW = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+const title = (t, size = 15) => new TextNode(t, {
+  font: FONTS.header, size, smallCaps: true, letterSpacing: size > 16 ? 2 : 1,
+  color: size > 16 ? COLORS.accent : COLORS.bone, shadow: HOUSE_SHADOW,
+});
+
+// ---- the purse ----
+const purse = { copper: 3475 }; // 34s 75c
+const purseNode = new UINode({ name: 'purse' });
+const coinIcons = ['gold', 'silver', 'copper'].map((k) => new QuadNode({ texture: engine.textures.get(`currency.${k}`) }));
+const coinTexts = [0, 1, 2].map(() => new TextNode('', { font: FONTS.mono, size: 12, color: COLORS.text, shadow: HOUSE_SHADOW }));
+coinIcons.forEach((ic, i) => { ic.setSize(16, 16); purseNode.add(ic, coinTexts[i]); });
+function paintPurse() {
+  const g = Math.floor(purse.copper / 10000), s = Math.floor((purse.copper % 10000) / 100), c = purse.copper % 100;
+  [g, s, c].forEach((v, i) => coinTexts[i].setText(String(v)));
+  purseNode.invalidateLayout();
+}
+purseNode.onLayout = function () {
+  let x = 0;
+  for (let i = 0; i < 3; i++) {
+    coinIcons[i].setPos(x, 0);
+    coinTexts[i].setPos(x + 20, 1);
+    x += 20 + coinTexts[i].w + 14;
+  }
+  this.setSize(x, 18);
+};
+paintPurse();
+
+// ---- bags + sealed chest (kept) ----
+const header = title('The Reliquary', 24);
+const satchelTitle = title('Satchel');
+const satchel = new ItemGrid({ cols: 6, rows: 3 });
+satchel.setItem(0, 'moss_poultice', 7);
+satchel.setItem(1, 'moss_poultice', 6);
+satchel.setItem(2, 'bone_darts', 18);
+satchel.setItem(7, 'void_shard', 2);
+satchel.setItem(9, 'sea_grimoire', 1);
+
+const chestTitle = title('Warded Chest');
+const chest = new ItemGrid({ cols: 4, rows: 2, locked: true });
+chest.setItem(0, 'elder_sigil', 1);
+chest.setItem(1, 'void_shard', 5);
+chest.setItem(5, 'bone_darts', 20);
+const seal = new ToggleLabel('Chest sealed', { checked: true });
+seal.on('change', (e) => {
+  chest.setLocked(e.checked);
+  EldEvents.log(e.checked ? 'The chest seals itself.' : 'The wards recede. The chest opens.');
+});
+
+const log = new EventLog({ width: 330, height: 170 }); // 140 -> up-to-170 tall @(small text boxes); the layout fn derives the real height from the frame
+// census: an empty framed ledger reads as a dead slab at boot — seed the first
+// line (FROZEN takes the fixed stamp; a wall-clock stamp would break bit-stability)
+if (FROZEN) log.append('[--:--:--]', 'EVENT', 'The ledger opens.');
+else EldEvents.log('The ledger opens.');
+const btnVendor = new Button('Visit the Drowned Market', { onClick: openVendor });
+const btnLoot = new Button('Open the Tide Chest', { onClick: openLoot });
+engine.layers.background.add(header, satchelTitle, satchel, chestTitle, chest, seal, log, purseNode, btnVendor, btnLoot);
+
+const root = new UINode({ name: 'inventory-root' });
+engine.layers.background.add(root);
+// ---- the examined piece: the record every inventory screen keeps ----
+// the lower half of this page was empty. An inventory that can merge, split,
+// swap and seal but never SHOWS you what a stack is has the interesting half missing;
+// hovering a slot reads its record here, and the rarity colours the name the same way
+// the slot ring does.
+const detail = new UINode({ name: 'examined' });
+const detailBg = new NineSliceNode(engine.textures.frame('panel.dark'));
+const dHead = new TextNode('The Examined Piece', {
+  font: FONTS.header, size: 12, smallCaps: true, letterSpacing: 2, color: COLORS.accent, shadow: HOUSE_SHADOW,
+});
+const dArt = new QuadNode({ texture: engine.textures.get('slot.frame') });
+const dIcon = new QuadNode({ color: COLORS.voidBlack });
+const dName = new TextNode('', { font: FONTS.header, size: 16, smallCaps: true, letterSpacing: 1, color: COLORS.bone, shadow: HOUSE_SHADOW });
+const dRar = new TextNode('', { size: 11, color: COLORS.textMuted, shadow: HOUSE_SHADOW });
+const dDesc = new TextNode('Hover a stack to read it.', {
+  size: 12, color: COLORS.textFaint, shadow: HOUSE_SHADOW, multiline: true, maxWidth: 420,
+});
+const dCount = new TextNode('', { font: FONTS.mono, size: 12, color: COLORS.text, shadow: HOUSE_SHADOW });
+detail.add(detailBg, dHead, dArt, dIcon, dName, dRar, dDesc, dCount);
+detail.setSize(520, 150);
+detailBg.setRect(0, 0, 520, 150);
+dHead.setPos(14, 10);
+dArt.setRect(14, 36, 72, 72);
+dIcon.setRect(20, 42, 60, 60);
+dName.setPos(100, 38);
+dRar.setPos(100, 62);
+dCount.setPos(100, 82);
+dDesc.setPos(14, 116);
+engine.layers.background.add(detail);
+
+function examine(id, count) {
+  const d = id ? itemData(id) : null;
+  if (!d) {
+    dName.setText('');
+    dRar.setText('');
+    dCount.setText('');
+    dDesc.setText('Hover a stack to read it.');
+    dIcon.setTexture(null);
+    dIcon.setColor(COLORS.voidBlack);
+    return;
+  }
+  dName.setText(d.name ?? id);
+  dName.setColor(rarityColor(d.rarity));
+  dRar.setText(String(d.rarity ?? 'common'));
+  dRar.setColor(rarityColor(d.rarity));
+  dCount.setText(count > 1 ? `${count} of ${d.stackMax ?? 1} to a stack` : 'a single piece');
+  dDesc.setText(d.desc ?? '');
+  dIcon.setColor(0xffffff);
+  dIcon.setTexture(engine.textures.get(`icon.${d.icon}`));
+}
+// every slot in both grids reports what it is holding as the cursor crosses it
+for (const grid of [satchel, chest]) {
+  for (const slot of grid.slots) {
+    slot.on('pointerenter', () => {
+      const it = grid.getItem(grid.slots.indexOf(slot));
+      examine(it?.item ?? null, it?.count ?? 0);
+    });
+  }
+}
+
+root.onLayout = function () {
+  header.setPos(Math.round((engine.width - header.w) / 2), 22);
+  const left = Math.round((engine.width - (satchel.w + 40 + Math.max(chest.w, log.w))) / 2);
+  satchelTitle.setPos(left, 96);
+  satchel.setPos(left, 122);
+  // stacked, not side-by-side: the row form ran the second button under the log
+  // column (the census's Button-on-EventLog overlap)
+  btnVendor.setPos(left, 122 + satchel.h + 14);
+  btnLoot.setPos(left, 122 + satchel.h + 14 + btnVendor.h + 8);
+  const rx = left + satchel.w + 40;
+  chestTitle.setPos(rx, 96);
+  chest.setPos(rx, 122);
+  seal.setPos(rx, 122 + chest.h + 10);
+  // the ledger fills what the frame leaves between the seal row and the examined
+  // panel (the 140px ledger read too little; the flat 170
+ // bump overlapped the panel by 13px at the short ~665px headless viewport the
+ // instruments read). Derived from the SAME inputs the panel's y uses below —
+  // never from detail's laid-out rect (the glue lesson).
+  const detailTop = Math.max(360, engine.height - detail.h - 74);
+  log.setSize(330, Math.max(120, Math.min(170, detailTop - (122 + chest.h + 40) - 8)));
+  log.setPos(rx, 122 + chest.h + 40);
+  purseNode.setPos(Math.round(engine.width - purseNode.w - 24), 26);
+  detail.setPos(left, Math.max(360, engine.height - detail.h - 74));
+};
+
+// ---- shared "how many?" dialog: the NumberField stepper in a small window ----
+// ---- the input replay's handle bag (the seventh instrument): handles, never coordinates ----
+window.__inv = {
+  satchel: () => satchel,
+  chest: () => chest,
+  seal: () => seal,
+  sslot: (i) => satchel.slots[i],
+  cslot: (i) => chest.slots[i],
+  sitem: (i) => satchel.getItem(i),
+  citem: (i) => chest.getItem(i),
+  popupCancel: () => EldPopup.cancelBtn,
+  menuOpen: () => EldContextMenu.isOpen,
+  // the newest window's Confirm button (askCount's), found by its label text
+  confirmBtn: () => {
+    const w = EldWindow.windows[EldWindow.windows.length - 1];
+    let btn = null;
+    const walk = (n) => { if (n?.label?._text === 'Confirm') btn = n; (n?.children ?? []).forEach(walk); };
+    walk(w);
+    return btn;
+  },
+};
+
+function askCount({ title: t, max, value }, onOkay) {
+  const win = EldWindow.create({
+    title: t, width: 300, height: 190, x: Math.round(engine.width / 2 - 150), y: 180,
+    resizable: false,
+    content: (c) => {
+      const nf = new NumberField({ value: value ?? Math.ceil(max / 2), min: 1, max, width: 160 });
+      nf.setPos(Math.round((252 - nf.w) / 2), 14);
+      const ok = new Button('Confirm', { minWidth: 100, onClick: () => { win.close(); onOkay(nf.value); } });
+      const cancel = new Button('Cancel', { minWidth: 100, onClick: () => win.close() });
+      ok.setPos(14, 68);
+      cancel.setPos(134, 68);
+      c.add(nf, ok, cancel);
+    },
+  });
+}
+
+// ---- the item context menu (replaces the built-in split-only menu: show-while-open
+// replaces, and this handler runs after the slot's own on the bubble path) ----
+function fmtPrice(copper) {
+  // same denominations as paintPurse: gold rolls up at 10000c (the Elder Sigil crosses it)
+  const g = Math.floor(copper / 10000), s = Math.floor((copper % 10000) / 100), c = copper % 100;
+  return g ? `${g}g ${s}s ${c}c` : s ? `${s}s ${c}c` : `${c}c`;
+}
+
+function wireItemMenu(grid, { vendor = false } = {}) {
+  grid.on('rightclick', (e) => {
+    const slot = e.target?.closest?.((n) => n.slotKind === 'item');
+    // a locked grid offers no rites — EXCEPT a vendor's wares, whose seal only blocks
+    // dragging: buying stays a deliberate right-click act (see openVendor's caption)
+    if (!slot || (grid.locked && !vendor)) return;
+    const index = grid.slots.indexOf(slot);
+    const item = grid.getItem(index);
+    if (!item) return;
+    // consume only when a menu actually shows: an EMPTY slot leaves the
+    // gesture to the radial chain — the grid provider below answers it instead
+    e.preventDefault();
+    const d = itemData(item.item);
+    const entries = [];
+    if (vendor) {
+      // wares: buying is the only rite (the grid is sealed against dragging)
+      const price = PRICES[item.item] ?? 100;
+      entries.push({ label: `Buy One — ${fmtPrice(price)}`, onClick: () => buy(item.item, 1) });
+      if ((d.stackMax ?? 1) > 1) {
+        entries.push({ label: 'Buy Several…', onClick: () => askCount({ title: 'Buy How Many?', max: d.stackMax }, (n) => buy(item.item, n)) });
+      }
+    } else {
+      if (USABLE.has(item.item)) {
+        entries.push({ label: `Use ${d.name}`, onClick: () => useItem(grid, index) });
+      }
+      if (item.count > 1) {
+        entries.push({ label: 'Split Stack…', onClick: () => askCount({ title: 'Split How Many?', max: item.count - 1 }, (n) => split(grid, index, n)) });
+      }
+      entries.push({ label: `Sell Stack — ${fmtPrice(Math.floor((PRICES[item.item] ?? 100) / 2) * item.count)}`,
+        disabled: !vendorWin, onClick: () => sell(grid, index) });
+      entries.push({ separator: true });
+      entries.push({ label: 'Discard…', onClick: () => discard(grid, index) });
+    }
+    EldContextMenu.show(entries, e.x, e.y);
+  });
+}
+
+function useItem(grid, index) {
+  const item = grid.getItem(index);
+  if (!item) return;
+  if (item.count > 1) grid.setItem(index, item.item, item.count - 1);
+  else grid.clearSlot(index);
+  EldEvents.log('The moss knits your wounds shut. It itches.', 'ITEM');
+}
+
+function split(grid, index, n) {
+  const item = grid.getItem(index);
+  const empty = grid.firstEmpty();
+  if (!item || !empty || n <= 0 || n >= item.count) {
+    EldEvents.log('The split fails — no empty slot or a foolish count.', 'ITEM');
+    return;
+  }
+  const emptyIndex = grid.slots.indexOf(empty);
+  grid.setItem(index, item.item, item.count - n);
+  grid.setItem(emptyIndex, item.item, n);
+  EldEvents.log(`Split ${n} from the "${itemData(item.item).name}" stack.`, 'ITEM');
+}
+
+function sell(grid, index) {
+  const item = grid.getItem(index);
+  if (!item || !vendorWin) return;
+  const coins = Math.floor((PRICES[item.item] ?? 100) / 2) * item.count;
+  grid.clearSlot(index);
+  purse.copper += coins;
+  paintPurse();
+  EldToast.show({ title: 'Sold', message: `${itemData(item.item).name} ×${item.count} for ${fmtPrice(coins)}.`, variant: 'loot', icon: itemData(item.item).icon, duration: 3 });
+}
+
+function discard(grid, index) {
+  const item = grid.getItem(index);
+  if (!item) return;
+  EldPopup.show({
+    title: 'Discard',
+    message: `Cast ${itemData(item.item).name} ×${item.count} into the dark? The dark keeps what it is given.`,
+    onOkay: () => { grid.clearSlot(index); EldEvents.log('The dark accepts.', 'ITEM'); },
+  });
+}
+
+function buy(itemId, n) {
+  const price = (PRICES[itemId] ?? 100) * n;
+  if (purse.copper < price) {
+    EldToast.show({ title: 'Too poor', message: 'The merchant’s sympathy is not for sale either.', duration: 3 });
+    return;
+  }
+  // top up an existing stack first, else take an empty slot
+  const d = itemData(itemId);
+  let placed = false;
+  for (let i = 0; i < satchel.slots.length && !placed; i++) {
+    const it = satchel.getItem(i);
+    if (it && it.item === itemId && it.count + n <= (d.stackMax ?? 1)) {
+      satchel.setItem(i, itemId, it.count + n);
+      placed = true;
+    }
+  }
+  if (!placed) {
+    const empty = satchel.firstEmpty();
+    if (!empty) {
+      EldToast.show({ title: 'Bags full', message: 'Even greed needs pockets.', duration: 3 });
+      return;
+    }
+    satchel.setItem(satchel.slots.indexOf(empty), itemId, n);
+  }
+  purse.copper -= price;
+  paintPurse();
+  EldToast.show({ title: 'Purchased', message: `${d.name} ×${n} for ${fmtPrice(price)}.`, variant: 'loot', icon: d.icon, duration: 3 });
+}
+
+wireItemMenu(satchel);
+wireItemMenu(chest);
+// radial-chain demonstration: the SATCHEL is a provider. Filled stacks
+// keep their dropdown menu (Split/Sell/Discard stay a menu),
+// but a right-click on an EMPTY slot or the grid chrome now asks the chain and
+// gets the satchel's own housekeeping verbs instead of dead air.
+satchel.radialItems = [
+  { id: 'sort', label: 'Sort', onSelect: () => satchel.sort({ silent: false }) },
+  { id: 'seal', label: 'Seal / Unseal', onSelect: () => satchel.setLocked(!satchel.locked) },
+];
+
+// ---- the Drowned Market (vendor window: sealed wares, buy via the menu) ----
+let vendorWin = null;
+function openVendor() {
+  if (vendorWin) { vendorWin.bringToFront(); return; }
+  // the ware grid is built FIRST so the height DERIVES from it: caption band
+  // 52 + grid + 62 chrome/seam — the old 228 literal was measured against 44px slots
+  const wares = new ItemGrid({ cols: 4, rows: 2, locked: true });
+  wares.setItem(0, 'moss_poultice', 10);
+  wares.setItem(1, 'bone_darts', 20);
+  wares.setItem(2, 'void_shard', 5);
+  wares.setItem(3, 'sea_grimoire', 1);
+  vendorWin = EldWindow.create({
+    title: 'The Drowned Market', width: 320, height: 52 + wares.h + 62, x: 120, y: 140,
+    onClose: () => { vendorWin = null; },
+    content: (c) => {
+      const cap = new TextNode('Right-click a ware to strike a bargain.\nThe merchant does not haggle.',
+        { size: 12, color: COLORS.textMuted, multiline: true, maxWidth: 250, shadow: HOUSE_SHADOW });
+      cap.setPos(4, 4);
+      wares.setPos(4, 52);
+      wireItemMenu(wares, { vendor: true });
+      c.add(cap, wares);
+    },
+  });
+}
+
+// ---- the Tide Chest (loot window: take all into the satchel) ----
+let lootWin = null;
+function openLoot() {
+  if (lootWin) { lootWin.bringToFront(); return; }
+  // the loot grid is built FIRST so the height and the Take All seat DERIVE from
+  // it — the old 66/168 literals were measured against 44px slots
+  const loot = new ItemGrid({ cols: 4, rows: 1 });
+  loot.setItem(0, 'moss_poultice', 3);
+  loot.setItem(1, 'void_shard', 1);
+  loot.setItem(3, 'bone_darts', 12);
+  lootWin = EldWindow.create({
+    title: 'The Tide Chest', width: 300, height: 4 + loot.h + 100, x: 520, y: 160,
+    onClose: () => { lootWin = null; },
+    content: (c) => {
+      loot.setPos(4, 4);
+      wireItemMenu(loot);
+      const takeAll = new Button('Take All', {
+        onClick: () => {
+          for (let i = 0; i < loot.slots.length; i++) {
+            const item = loot.getItem(i);
+            if (!item) continue;
+            const empty = satchel.firstEmpty();
+            if (!empty) { EldToast.show({ title: 'Bags full', message: 'The tide keeps the rest.', duration: 3 }); break; }
+            satchel.setItem(satchel.slots.indexOf(empty), item.item, item.count);
+            loot.clearSlot(i);
+            EldEvents.log(`Taken: ${itemData(item.item).name} ×${item.count}.`, 'LOOT');
+          }
+        },
+      });
+      takeAll.setPos(4, 4 + loot.h + 2);
+      c.add(loot, takeAll);
+    },
+  });
+}
+
+window.inventoryApi = { satchel, chest, seal, purse, paintPurse, openVendor, openLoot, buy, split, sell, discard, useItem };
+
+// ---- the ground circle: right-click on dead ground opens the wheel;
+// a right-click on a STACK keeps its item menu (the ruling — the slot is
+// the press's target, so the wheel never sees it).
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'vendor', label: 'Market' },
+ { id: 'loot', label: 'Chest' },
+ { id: 'satchel', label: 'Satchel', children: [
+ { id: 'sort', label: 'Sort' },
+ { id: 'use', label: 'Use First' },
+ ] },
+ ],
+});
+const GROUND_VERBS = {
+  vendor: openVendor,
+  loot: openLoot,
+  // the same public verbs the item menu drives: sort consolidates + packs
+  // (loud — one itemchange {action:'sort'} summary), Use First eats the first
+  // filled satchel slot through useItem's own toast/log path
+  'satchel/sort': () => satchel.sort({ silent: false }),
+  'satchel/use': () => {
+    const i = satchel.slots.findIndex((_, k) => satchel.getItem(k) != null);
+    if (i !== -1) useItem(satchel, i);
+  },
+};
+ground.on('select', ({ id, path }) => (GROUND_VERBS[path.join('/')] ?? GROUND_VERBS[id])?.());
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+window.inventoryApi.ground = ground;
+
+// ---- the icon pack: the RE-SKIN idiom ----
+// `as:` points at the icon ids the items ALREADY carry, so the registry re-bakes
+// those exact names in place: every filled slot follows on its own — no
+// registerItem round trip, no slot refresh, no new names — and the atlas budget
+// never moves. `fallback: 'none'` leaves the procedural art standing when the
+// assets folder is absent. Runs on every boot except the frozen snapshot, whose
+// exclusion is mechanical: --screenshot captures at the load event and cannot
+// wait for an async decode (see game-hud.html for the measurement).
+const PACK_ITEMS = [
+  { id: 'ico-0305', as: 'leafs' },     // Briar Remedy over the moss poultice
+  { id: 'ico-0707', as: 'arrows' },    // Bonecast Shortbow over the bone darts
+  { id: 'ico-0066', as: 'deathkiss' }, // Tidal Shard over the void shard
+  { id: 'ico-3650', as: 'book' },      // Forbidden Grimoire over the sea grimoire
+  { id: 'ico-0049', as: 'shield' },    // Ember Seal over the elder sigil
+];
+const packReady = FROZEN
+  ? Promise.resolve({ registered: [], missing: ['(frozen: procedural baseline)'] })
+  : Eldritch.loadIcons({ base: '../assets/icons', fallback: 'none', icons: PACK_ITEMS });
+
+// ---- ?assert=1: the in-page suite (the rites through the page's own verbs) ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const totalOf = (id) => satchel.slots.reduce((t, sl, i) => {
+    const it = satchel.getItem(i);
+    return t + (it && it.item === id ? it.count : 0);
+  }, 0);
+  (async () => {
+    // the pack lands first: the suite is the instrument that CAN await it, so
+    // this is where the painted art gets proved (the frozen shot cannot)
+    const packRes = await packReady;
+    await wait(900); // the boot pop tweens settle
+
+    // the re-skin lands UNDER the ids the items already carry, so every filled
+    // slot shows painted art with no registerItem round trip and no refresh
+    const poulticeSlot = satchel.slots[0];
+    ok(`the icon pack re-skins the item art in place [${packRes.registered.join(',') || 'none'}${packRes.missing.length ? ' missing:' + packRes.missing.join(',') : ''}]`,
+      packRes.missing.length === 0
+      && packRes.registered.length === PACK_ITEMS.length
+      && itemData('moss_poultice').icon === 'leafs'
+      && poulticeSlot.icon?.quad?.material?.map === engine.textures.get('icon.leafs'));
+
+    // the split conserves the ledger
+    const darts0 = totalOf('bone_darts');
+    split(satchel, 2, 5);
+    await wait(60);
+    ok('a split conserves the ledger', totalOf('bone_darts') === darts0
+      && satchel.getItem(2)?.count === darts0 - 5);
+
+    // use consumes exactly one
+    const moss0 = satchel.getItem(0)?.count ?? 0;
+    useItem(satchel, 0);
+    await wait(60);
+    ok('use consumes exactly one', satchel.getItem(0)?.count === moss0 - 1);
+
+    // the warded chest refuses drops until the seal lifts (the oracle)
+    const sealedNo = EldDragDrop.canAccept(chest.slots[6], { itemId: 'bone_darts', count: 1, sourceSlot: satchel.slots[2] });
+    seal.dispatch('change', { checked: false });
+    await wait(60);
+    const openYes = EldDragDrop.canAccept(chest.slots[6], { itemId: 'bone_darts', count: 1, sourceSlot: satchel.slots[2] });
+    seal.dispatch('change', { checked: true });
+    await wait(60);
+    ok('the seal gates the drop oracle both ways',
+      sealedNo === false && openYes === true && chest.locked === true);
+
+    // the boot scene proves its own zero (before any window or toast opens)
+    await wait(200);
+    const audit = runAudit(engine);
+    const v0 = audit.violations[0];
+    const cts = audit.counts;
+    // every rule, not a hand-list: a five-name sum silently exempts whatever rule
+    // lands next (reach, the sixth, was invisible to it)
+    ok(`the page audits clean on every rule${v0 ? ` [${v0.rule} ${v0.path} ${v0.detail ?? ''}]` : ''}`,
+      Object.values(cts).reduce((a, b) => a + b, 0) === 0);
+
+    // hit-reach: the REAL hit path answers at a slot's center (dispatch bypasses
+    // hit testing — the occlusion proof). The satchel is probed BEFORE the market
+    // opens: the vendor window raises exactly over its first column.
+    const reach = (n) => {
+      const h = hitTest(engine, n.worldX + n.w / 2, n.worldY + n.h / 2);
+      return h != null && (h === n || n.isAncestorOf?.(h));
+    };
+    ok('hit-reach: the satchel\'s first slot answers the real hit probe', reach(satchel.slots[0]));
+
+    // the market: buying tops a stack and the purse pays full price
+    // (both price relations DERIVE from PRICES — 36 was 12*3 written out, a literal
+    // that keeps passing only until someone repraises the moss)
+    const purse0 = purse.copper;
+    openVendor();
+    await wait(120);
+    // the freshly-raised window's own wares answer the probe too — a sealed grid
+    // still reads and right-clicks, so its slots must be reachable where they stand
+    const wares = vendorWin.content.children.find((n) => n instanceof ItemGrid);
+    ok('hit-reach: the market\'s first ware answers under the raised window',
+      wares != null && reach(wares.slots[0]));
+    // both trade windows hug what they paint (the dead-band sweep):
+    // no rail at rest, no phantom range, dead band within the breathing budget
+    const hug = (w) => {
+      const sa = w.contentArea, slack = sa.boxH - sa.contentH;
+      return !sa.vBarVisible && sa.maxScroll === 0 && slack >= 0 && slack <= 24;
+    };
+    openLoot();
+    await wait(120);
+    ok('the market and the chest hug their wares — no dead stone, no phantom range',
+      hug(vendorWin) && hug(lootWin));
+    lootWin.close();
+    await wait(120);
+    buy('moss_poultice', 3);
+    await wait(80);
+    ok('buying tops the stack and the purse pays',
+      purse.copper === purse0 - PRICES.moss_poultice * 3 && satchel.getItem(0)?.count === moss0 - 1 + 3);
+
+    // selling pays half while the market stands open
+    const purse1 = purse.copper;
+    const stack1 = satchel.getItem(1);
+    sell(satchel, 1);
+    await wait(80);
+    ok('selling pays half while the market is open',
+      purse.copper === purse1 + Math.floor(PRICES.moss_poultice / 2) * stack1.count && satchel.getItem(1) === null);
+
+    // the discard rite asks first, and the dark accepts
+    discard(satchel, 9);
+    await wait(120);
+    const gated = satchel.getItem(9) !== null; // the rite ASKS — nothing cleared yet
+    EldPopup._finish('ok');
+    await wait(120);
+    ok('the discard rite asks first and the dark accepts', gated && satchel.getItem(9) === null);
+
+    // the ground circle, LAST — the Sort pick PACKS the satchel, so it
+    // must never run before the slot-addressed fixtures above: dead ground opens
+    // the wheel; the nested Satchel>Sort commits ONE loud summary via the grid's verb
+    engine.bus.emit('pointerdown', { x: 640, y: 60, button: 2, pointerId: 95, target: null, native: null });
+    await wait(60);
+    ok('ground: a right-click on dead ground opens the wheel',
+      window.inventoryApi.ground.isOpen === true);
+    const sorts = [];
+    const offSort = satchel.on('itemchange', (e) => { if (e.action === 'sort') sorts.push(e); });
+    window.inventoryApi.ground._setIndex(2, false); // Satchel
+    window.inventoryApi.ground.onActivate();
+    await wait(40);
+    window.inventoryApi.ground._setIndex(0, false); // Sort
+    window.inventoryApi.ground.onActivate();
+    await wait(80);
+    offSort();
+    ok('ground: the nested Sort pick commits one loud sort summary',
+      window.inventoryApi.ground.isOpen === false && sorts.length === 1);
+
+    // the radial CHAIN: an EMPTY satchel slot declines nothing — the grid
+    // provider answers with its housekeeping verbs, while a FILLED stack keeps
+    // its dropdown menu (Split/Sell/Discard stay a menu)
+    {
+      const emptyIdx = satchel.slots.findIndex((_, i) => !satchel.getItem(i));
+      const emptySlot = satchel.slots[emptyIdx];
+      const openedI = engine.radialFallback(emptySlot, 400, 300, null);
+      ok('chain: an empty satchel slot asks the chain and gets the grid verbs',
+        openedI === true && engine.radialShared?.isOpen === true
+        && engine.radialShared.items[0]?.id === 'sort');
+      engine.radialShared.close({ silent: true });
+      await wait(40);
+      const filledIdx = satchel.slots.findIndex((_, i) => !!satchel.getItem(i));
+      satchel.slots[filledIdx].dispatch('rightclick', { x: 400, y: 300 });
+      await wait(60);
+      ok('chain: a filled stack still opens its dropdown menu — the menus KEEP',
+        EldContextMenu.isOpen === true && engine.radialShared.isOpen === false);
+      EldContextMenu.close();
+      await wait(40);
+    }
+
+    // the boot-health hooks are part of the contract: a suite that went green while
+    // an error rode the title would be measuring the wrong thing
+    ok('the page runs error-free end to end', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `INVENTORY ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+}
+if (FROZEN) {
+  // finish boot animations on a fixed clock, then halt the ticker (bit-stable frame)
+  setTimeout(() => {
+    const tk = engine.ticker;
+    tk.stop();
+    for (let i = 0; i < 600 && (tk.tweens.size > 0 || i < 20); i++) {
+      tk.time += 1 / 60;
+      tk._stepTweens(1 / 60);
+      for (const cb of [...tk.callbacks]) cb(1 / 60, tk.time);
+      if (tk._frame) tk._frame(1 / 60, tk.time);
+    }
+  }, 600);
+}
+
+setTimeout(() => {
+  document.title = window.__errs.length
+    ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+    : 'INVENTORY READY';
+}, 1000);
+</script>
+</body>
+</html>

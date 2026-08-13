@@ -1,0 +1,1054 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Strategy HUD</title>
+<!-- @demo   The War Table: a drowned coast you can actually command - marquee-select the thralls, right-click to order them across painted ground, spend the tithe to raise more, and hold the bell when the tide answers.
+     @shows  SelectionMarquee, CommandCard, BuildQueue, TacticalMap, TalentPanes, ResourceBar, SpeedControl, RadialMenu, EldNotify, EldWindow, EldTooltip, EventLog, VBox, TextNode, UINode, QuadNode, COLORS
+     @params ?freeze=1 — bit-stable snapshot boot (no ambiance, the tide holds, seeded log) · ?assert=1 — the in-page suite titles its own PASS count · ?torture=1 / ?audit=1 / ?resize=1 — the page parks its own clock for each instrument, so a drifting token can never race the hover/press sample or the census -->
+
+<!-- The rebuild. What this page was: fourteen 10x10 green quads on black, two
+     buttons that poked the library ("Ping the Shallows", "Sound the Alarm"), and a
+     camera that moved the minimap viewport while the field it claimed to show never
+     moved. What it is now: one drowned-coast world painted into a single page-owned
+     canvas (the deckbuilder/shooter backdrop idiom - zero atlas entries), thralls that
+     walk where you send them, a tide that answers on its own clock, and an order book
+     that ticks itself off. Every control is one a player would have:
+
+       drag empty ground   marquee-select        right-click ground   order the selection
+       Q / W / E           the command card      click the map        move the camera
+
+     The two driver buttons are GONE (ruling 2): the map pings when a wave
+     actually lands and the banner raises from the same event, so both effects are now
+     narrated by the game instead of summoned by a button. THE STILLNESS LOOP is the
+     page teaching itself - the "Stillness" command boots sealed with the reason
+     "Requires a Stillness Obelisk on the field", the obelisk is the second entry in
+     the build queue, and finishing it un-seals the command for real.
+
+     Instrument protocol: the INSTRUMENTED gate parks the tide for every census boot
+     (freeze, assert, audit, torture, resize) - a token that drifts between the
+     walker's hover and press samples is a flake, and a wall-clock log line never
+     settles into a bit-stable baseline, so FROZEN seeds fixed stamps. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {
+  Eldritch, SelectionMarquee, CommandCard, BuildQueue, TacticalMap, TalentPanes,
+  ResourceBar, SpeedControl, RadialMenu, EldNotify, EldWindow, EldTooltip, EventLog,
+  VBox, TextNode, UINode, QuadNode, runAudit, hitTest, COLORS,
+} from '../src/lovecraft-ui.js';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+// INSTRUMENTED (the arcade/meters idiom): every census boot must see a RESTING
+// coast - gate the clock at the source, not behind a dead window. The walker samples
+// instantly and a drifting token races its own hover/press pair; the frozen shot cannot
+// settle while anything moves; the audit reads a different overlap set every run. The
+// assert suite drives the verbs itself with fixed numbers instead.
+const INSTRUMENTED = FROZEN || ASSERT
+  || params.has('audit') || params.has('torture') || params.has('resize');
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { contextMenu: false }); // right-click orders + the ground circle — the canvas owns its menu
+const engine = Eldritch.engine;
+
+// ---- the icon pack (optional download): the RE-SKIN idiom ----
+// `as:` points at icon ids this page ALREADY uses, so the registry re-bakes those NAMES
+// in place: every live quad follows with no page code and no atlas movement.
+// `fallback: 'none'` leaves the procedural art standing when assets/ is absent, which is
+// the shipped default - the pack is an optional download and the page must not need it.
+// Skipped under FROZEN: --screenshot captures at the load event and cannot wait for an
+// async decode, so frozen baselines run on the procedural art by necessity.
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-3649', as: 'book' },
+      { id: 'ico-0210', as: 'shield' },
+      { id: 'ico-0513', as: 'sword' },
+      { id: 'ico-0489', as: 'blindinglight' },
+      { id: 'ico-0707', as: 'arrows' },
+      { id: 'ico-0307', as: 'leafs' },
+      { id: 'ico-0394', as: 'deathkiss' },
+      { id: 'ico-0017', as: 'fireball' },
+      { id: 'ico-0078', as: 'fireball2' },
+    ],
+  });
+}
+
+window.engine = engine;
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+
+// ---------------------------------------------------------------- the coast
+// One world, one camera. Screen = world - camera; everything on the field agrees
+// on that single transform, which is the bug the old page had (the minimap moved a
+// "camera" nothing else read).
+// The camera default has to SHOW the coast: with the shoreline parked off the top of
+// the view the page was a town on mud, not a drowned harbour. Sea band, town and
+// muster ground are laid out to fit one 1280x760 frame at camera (620, 40).
+const WORLD = { w: 2400, h: 1150 };
+const camera = { x: 620, y: 40, w: 640, h: 400 };
+const SHORE_Y = 190;          // world y where the sea gives way to the flats
+const BELL = { x: 1168, y: 360 };
+const FERRY = { x: 1740, y: 780 };
+const OBELISK_AT = { x: 856, y: 386 };
+
+const STRUCTURES = [
+  { x: 1120, y: 300, w: 96,  h: 96,  kind: 'tower' },   // the west bell
+  { x: 1180, y: 196, w: 130, h: 40,  kind: 'jetty' },   // a pier walking into the water
+  { x: 860,  y: 452, w: 92,  h: 64,  kind: 'hall' },
+  { x: 1004, y: 560, w: 74,  h: 54,  kind: 'hall' },
+  { x: 1284, y: 512, w: 104, h: 60,  kind: 'hall' },
+  { x: 1436, y: 392, w: 66,  h: 50,  kind: 'hall' },
+  { x: 762,  y: 268, w: 82,  h: 54,  kind: 'ruin' },
+  { x: 1552, y: 654, w: 88,  h: 58,  kind: 'ruin' },
+];
+const LANTERNS = [{ x: 1168, y: 330 }, { x: 1010, y: 546 }, { x: 1452, y: 420 }, { x: 1740, y: 762 }];
+let obeliskBuilt = false;
+
+function seeded(n) { let s = n; return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff; }
+
+// Ground detail is WORLD-anchored and generated once from a fixed seed, so it pans
+// with the camera instead of crawling, and a frozen shot is bit-stable. Empty flats
+// were the second thing wrong with the first rebuild: a coast needs marsh and standing
+// water, not an unbroken dark field.
+const DETAIL = (() => {
+  const r = seeded(9173);
+  const out = [];
+  for (let i = 0; i < 260; i++) {
+    out.push({ x: r() * WORLD.w, y: SHORE_Y + 16 + r() * (WORLD.h - SHORE_Y - 30), k: r(), s: r() });
+  }
+  return out;
+})();
+
+// ---- the backdrop: ONE page-owned canvas repainted when the camera moves.
+// Registry-free by construction, so ATLAS holds at 141 no matter how much coast
+// this paints (the / precedent, generalised).
+const ground = new UINode({ name: 'the-coast' });
+const bdCanvas = document.createElement('canvas');
+const bdTex = new THREE.CanvasTexture(bdCanvas);
+// Match the library's own dynamic-canvas settings (texgen.createCanvasTexture) so
+// page art and baked art sample identically - linear filter, no mipmaps, sRGB in.
+bdTex.colorSpace = THREE.SRGBColorSpace;
+bdTex.minFilter = THREE.LinearFilter;
+bdTex.magFilter = THREE.LinearFilter;
+bdTex.generateMipmaps = false;
+const bdQuad = new QuadNode({ texture: bdTex });
+ground.add(bdQuad);
+engine.layers.background.add(ground);
+ground.on('dispose', () => bdTex.dispose());
+
+function paintCoast() {
+  const W = Math.max(2, Math.round(engine.width)), H = Math.max(2, Math.round(engine.height));
+  if (bdCanvas.width !== W || bdCanvas.height !== H) { bdCanvas.width = W; bdCanvas.height = H; }
+  const ctx = bdCanvas.getContext('2d');
+  const ox = -camera.x, oy = -camera.y;   // world -> screen
+  ctx.clearRect(0, 0, W, H);
+
+  // the flats: wet ground inland of the shore
+  ctx.fillStyle = '#0a1310';
+  ctx.fillRect(0, 0, W, H);
+
+  // the sea, north of the shoreline
+  const shoreS = SHORE_Y + oy;
+  if (shoreS > 0) {
+    const sea = ctx.createLinearGradient(0, Math.min(0, shoreS - 260), 0, shoreS);
+    sea.addColorStop(0, '#061019');
+    sea.addColorStop(1, '#0c1c22');
+    ctx.fillStyle = sea;
+    ctx.fillRect(0, 0, W, shoreS);
+    // swell lines, seeded so the frozen shot is bit-stable
+    const rnd = seeded(4211);
+    ctx.strokeStyle = 'rgba(111,209,139,0.05)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 14; i++) {
+      const y = shoreS - 8 - rnd() * 240;
+      if (y < -4) continue;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      for (let x = 0; x <= W; x += 40) ctx.lineTo(x, y + Math.sin((x + i * 90) * 0.012) * 2.5);
+      ctx.stroke();
+    }
+    // foam along the tideline
+    ctx.strokeStyle = 'rgba(160,215,190,0.16)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 16) ctx.lineTo(x, shoreS + Math.sin((x - ox) * 0.008) * 4);
+    ctx.stroke();
+  }
+
+  // the survey grid: how you read distance on a war table
+  ctx.strokeStyle = 'rgba(111,209,139,0.045)';
+  ctx.lineWidth = 1;
+  const G = 120;
+  for (let gx = Math.floor(camera.x / G) * G; gx < camera.x + W; gx += G) {
+    const sx = Math.round(gx + ox) + 0.5;
+    ctx.beginPath(); ctx.moveTo(sx, Math.max(0, shoreS)); ctx.lineTo(sx, H); ctx.stroke();
+  }
+  for (let gy = Math.floor(camera.y / G) * G; gy < camera.y + H; gy += G) {
+    const sy = Math.round(gy + oy) + 0.5;
+    if (sy < shoreS) continue;
+    ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(W, sy); ctx.stroke();
+  }
+
+  // the causeway from the ferry gate to the bell
+  ctx.strokeStyle = 'rgba(70,84,74,0.5)';
+  ctx.lineWidth = 26;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(FERRY.x + ox, FERRY.y + oy);
+  ctx.quadraticCurveTo(1420 + ox, 700 + oy, BELL.x + ox, BELL.y + oy + 90);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(20,26,22,0.9)';
+  ctx.lineWidth = 22;
+  ctx.stroke();
+
+  // marsh, standing water and stone on the flats
+  for (const d of DETAIL) {
+    const x = d.x + ox, y = d.y + oy;
+    if (x < -12 || x > W + 12 || y < Math.max(0, shoreS) - 12 || y > H + 12) continue;
+    if (d.k < 0.5) {                       // a tuft of marsh grass
+      ctx.strokeStyle = 'rgba(46,82,56,0.55)';
+      ctx.lineWidth = 1;
+      const hgt = 3 + d.s * 4;
+      ctx.beginPath();
+      ctx.moveTo(x, y); ctx.lineTo(x - 1.5, y - hgt);
+      ctx.moveTo(x + 2, y); ctx.lineTo(x + 3, y - hgt * 0.8);
+      ctx.moveTo(x + 4, y); ctx.lineTo(x + 5.5, y - hgt * 0.6);
+      ctx.stroke();
+    } else if (d.k < 0.82) {               // standing water, holding a little sky
+      const rw = 6 + d.s * 16;
+      ctx.fillStyle = 'rgba(12,28,34,0.85)';
+      ctx.beginPath(); ctx.ellipse(x, y, rw, rw * 0.36, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(120,170,150,0.10)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.ellipse(x, y - 1, rw * 0.7, rw * 0.2, 0, Math.PI, Math.PI * 2); ctx.stroke();
+    } else {                               // a stone shouldering out of the mud
+      const rw = 3 + d.s * 5;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.beginPath(); ctx.ellipse(x + 1, y + 1.5, rw, rw * 0.6, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = 'rgba(58,66,60,0.75)';
+      ctx.beginPath(); ctx.ellipse(x, y, rw, rw * 0.62, 0, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // lantern pools - the only warm light on the coast
+  for (const L of LANTERNS) {
+    const g = ctx.createRadialGradient(L.x + ox, L.y + oy, 4, L.x + ox, L.y + oy, 130);
+    g.addColorStop(0, 'rgba(232,216,106,0.10)');
+    g.addColorStop(1, 'rgba(232,216,106,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(L.x + ox - 130, L.y + oy - 130, 260, 260);
+  }
+
+  // The town, in cheap 2.5D: a roof quad plus the south wall face below it. Flat
+  // footprints read as grey UI slabs from directly above (measured on the first
+  // rebuild shot) - one visible wall and a ridge line is what makes a rectangle
+  // read as a building, and it costs two more fillRects.
+  for (const s of STRUCTURES) {
+    const x = s.x + ox, y = s.y + oy;
+    if (x + s.w < -60 || x > W + 60 || y + s.h < -60 || y > H + 90) continue;
+    const wallH = s.kind === 'tower' ? 44 : (s.kind === 'jetty' ? 0 : 20);
+
+    if (s.kind === 'jetty') {
+      // planks over water: no wall face, and the sea shows between them
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(x + 4, y + 6, s.w, s.h);
+      ctx.fillStyle = '#23291f';
+      ctx.fillRect(x, y, s.w, s.h);
+      ctx.strokeStyle = 'rgba(10,14,11,0.9)';
+      ctx.lineWidth = 1;
+      for (let i = 1; i < 9; i++) {
+        const px = Math.round(x + (i * s.w) / 9) + 0.5;
+        ctx.beginPath(); ctx.moveTo(px, y); ctx.lineTo(px, y + s.h); ctx.stroke();
+      }
+      continue;
+    }
+
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(x + 7, y + 9, s.w, s.h + wallH);
+
+    // the wall face, with its lit windows
+    ctx.fillStyle = s.kind === 'ruin' ? '#131714' : '#191f1b';
+    ctx.fillRect(x, y + s.h, s.w, wallH);
+    if (s.kind !== 'ruin') {
+      ctx.fillStyle = 'rgba(232,216,106,0.55)';
+      ctx.fillRect(x + 11, y + s.h + 6, 6, 8);
+      if (s.w > 84) ctx.fillRect(x + s.w - 19, y + s.h + 6, 6, 8);
+      if (s.kind === 'tower') {
+        ctx.fillStyle = 'rgba(232,216,106,0.85)';
+        ctx.fillRect(x + s.w / 2 - 5, y + s.h + 16, 10, 14);
+      }
+    }
+
+    // The roof. A uniform fill reads as a UI slab however dark you make it (measured
+    // twice), so the value sits close to the ground and the SHAPE is carried by slate
+    // courses, two-tone grain and a lit north eave instead of by brightness.
+    ctx.fillStyle = s.kind === 'ruin' ? '#171b18' : '#1e2420';
+    ctx.fillRect(x, y, s.w, s.h);
+    const grain = seeded(Math.round(s.x * 31 + s.y));
+    ctx.strokeStyle = 'rgba(0,0,0,0.30)';       // slate courses running with the ridge
+    ctx.lineWidth = 1;
+    for (let cy = y + 5; cy < y + s.h - 2; cy += 6) {
+      ctx.beginPath(); ctx.moveTo(x + 1, Math.round(cy) + 0.5); ctx.lineTo(x + s.w - 1, Math.round(cy) + 0.5); ctx.stroke();
+    }
+    for (let i = 0; i < 22; i++) {
+      const gx = x + 2 + grain() * (s.w - 5), gy = y + 2 + grain() * (s.h - 4);
+      ctx.fillStyle = grain() > 0.55 ? 'rgba(96,108,98,0.16)' : 'rgba(0,0,0,0.28)';
+      ctx.fillRect(gx, gy, 2, 2);
+    }
+    if (s.kind === 'ruin') {
+      // a broken roofline: notches bitten out of the ridge, open to the dark
+      ctx.fillStyle = '#0a1310';
+      for (let i = 0; i < 4; i++) ctx.fillRect(x + 6 + i * (s.w / 4), y - 3, s.w / 10, 11);
+    } else {
+      ctx.strokeStyle = 'rgba(92,103,94,0.30)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x + 3, y + s.h / 2); ctx.lineTo(x + s.w - 3, y + s.h / 2);
+      ctx.stroke();
+    }
+    // the north eave catches what light there is; the other edges stay in shadow
+    ctx.strokeStyle = 'rgba(110,124,112,0.42)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(x, y + 0.5); ctx.lineTo(x + s.w, y + 0.5); ctx.stroke();
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x + 0.5, y); ctx.lineTo(x + 0.5, y + s.h);
+    ctx.moveTo(x + s.w - 0.5, y); ctx.lineTo(x + s.w - 0.5, y + s.h);
+    ctx.stroke();
+  }
+
+  // the obelisk: absent until the queue actually finishes it
+  if (obeliskBuilt) {
+    const x = OBELISK_AT.x + ox, y = OBELISK_AT.y + oy;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.beginPath(); ctx.ellipse(x, y + 6, 26, 9, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#454e47';
+    ctx.beginPath();
+    ctx.moveTo(x - 11, y); ctx.lineTo(x - 7, y - 54); ctx.lineTo(x + 7, y - 54); ctx.lineTo(x + 11, y);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = COLORS.accent;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+  bdTex.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------- the host
+// One 26x26 token raster, drawn WHITE so MeshBasicMaterial's map x color tint gives
+// every allegiance its own read from a single upload (26px clears the 24px
+// interactive floor with the art inset inside it).
+const TOKEN = 26;
+function tokenTexture() {
+  const c = document.createElement('canvas');
+  const s = Math.max(1, Math.round(window.devicePixelRatio || 1));
+  c.width = TOKEN * s; c.height = TOKEN * s;
+  const ctx = c.getContext('2d');
+  ctx.scale(s, s);
+  ctx.fillStyle = 'rgba(255,255,255,0.20)';           // the ground contact
+  ctx.beginPath(); ctx.ellipse(13, 22, 8, 3, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ffffff';                           // cloak
+  ctx.beginPath();
+  ctx.moveTo(13, 4); ctx.lineTo(19.5, 20); ctx.lineTo(6.5, 20);
+  ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.arc(13, 7, 4.6, 0, Math.PI * 2); ctx.fill();   // hood
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';                  // the face that is not there
+  ctx.beginPath(); ctx.arc(13, 7.6, 2.6, 0, Math.PI * 2); ctx.fill();
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function ringTexture() {
+  const c = document.createElement('canvas');
+  const s = Math.max(1, Math.round(window.devicePixelRatio || 1));
+  c.width = TOKEN * s; c.height = TOKEN * s;
+  const ctx = c.getContext('2d');
+  ctx.scale(s, s);
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.6;
+  ctx.beginPath(); ctx.ellipse(13, 20, 10, 4.2, 0, 0, Math.PI * 2); ctx.stroke();
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+const tokenTex = tokenTexture();
+const ringTex = ringTexture();
+
+const field = new UINode({ name: 'field' });
+// R-REACH: the battlefield is WORLD, and HUD chrome covering world is what a HUD is.
+// A thrall that walks under the build queue is genuinely unclickable until you move the
+// camera - which is the genre's own answer, not a defect. Declared on the container so
+// it covers every token the factory spawns; the rule resolves this up the chain.
+field.auditAllow('reach');
+engine.layers.background.add(field);
+field.on('dispose', () => { tokenTex.dispose(); ringTex.dispose(); });
+
+const units = [];
+function spawnUnit(side, wx, wy) {
+  const ring = new QuadNode({ texture: ringTex, color: COLORS.accent });
+  ring.setSize(TOKEN, TOKEN);
+  ring.visible = false;
+  const q = new QuadNode({ texture: tokenTex, color: side === 'ally' ? COLORS.ally : COLORS.enemy, interactive: side === 'ally' });
+  q.setSize(TOKEN, TOKEN);
+  const u = { q, ring, side, wx, wy, tx: wx, ty: wy, hp: side === 'ally' ? 3 : 2, picked: false, dead: false, hover: false };
+  if (side === 'ally') {
+    // The walker demands a visible hover AND press on every interactive node; a token
+    // brightens under the cursor and dips when pressed, both instant (hover art snaps -
+    // tweens are juice, the states-walker law). The hover flag is the PAGE's: UINode
+    // carries no `hovered` field, so reading one would have been a silent undefined.
+    q.on('pointerenter', () => { u.hover = true; tintUnit(u); });
+    q.on('pointerleave', () => { u.hover = false; u.q.setBaseOpacity(1); tintUnit(u); });
+    q.on('pointerdown', () => { u.q.setBaseOpacity(0.62); });
+    q.on('pointerup', () => { u.q.setBaseOpacity(1); tintUnit(u); });
+    q.on('click', () => { pickOnly(u); });
+    EldTooltip.attach(q, () => ({
+      title: 'Drowned Thrall',
+      lines: [{ text: `Strength ${u.hp}/3`, color: u.hp > 1 ? COLORS.textBright : COLORS.negative }],
+      desc: 'Drag empty ground to take a group. Right-click the ground to send them.',
+    }));
+  }
+  units.push(u);
+  field.add(ring, q);
+  return u;
+}
+function tintUnit(u) {
+  if (u.side !== 'ally') { u.q.setColor(COLORS.enemy); return; }
+  u.q.setColor(u.picked ? COLORS.accent : (u.hover ? COLORS.textBright : COLORS.ally));
+}
+function placeUnits() {
+  for (const u of units) {
+    const sx = Math.round(u.wx - camera.x - TOKEN / 2);
+    const sy = Math.round(u.wy - camera.y - TOKEN);
+    u.q.setPos(sx, sy);
+    u.ring.setPos(sx, sy);
+  }
+}
+function livingAllies() { return units.filter((u) => u.side === 'ally' && !u.dead); }
+function pickedAllies() { return livingAllies().filter((u) => u.picked); }
+function repaintPicks() {
+  for (const u of units) { u.ring.visible = u.picked && !u.dead; tintUnit(u); }
+  const n = pickedAllies().length;
+  card.setUnits(n ? [{ id: 'thrall', icon: 'deathkiss', count: n }] : []);
+  if (n) tickObjective('muster');
+}
+function pickOnly(u) {
+  for (const o of units) o.picked = false;
+  u.picked = true;
+  repaintPicks();
+}
+
+// The muster ground: open flats between the halls, clear of the bottom HUD lane at
+// 1280x760 (screen y stays under 560; the command card's top edge is about 614).
+const MUSTER = [
+  [960, 470], [1024, 492], [1090, 462], [1150, 492], [886, 592],
+  [1216, 466], [940, 566], [1140, 566], [992, 432], [1076, 522],
+];
+for (const [x, y] of MUSTER) spawnUnit('ally', x, y);
+
+// ---------------------------------------------------------------- orders
+function orderTo(list, wx, wy) {
+  if (!list.length) return;
+  // a loose ring so ten thralls do not stack on one pixel
+  list.forEach((u, i) => {
+    const a = (i / list.length) * Math.PI * 2;
+    const r = list.length > 1 ? 18 + list.length * 2.2 : 0;
+    u.tx = Math.max(40, Math.min(WORLD.w - 40, wx + Math.cos(a) * r));
+    u.ty = Math.max(SHORE_Y + 30, Math.min(WORLD.h - 40, wy + Math.sin(a) * r * 0.6));
+  });
+}
+
+// ---- the input replay's handle bag (the seventh instrument): handles, never coordinates ----
+const __onScreen = () => livingAllies()
+  .map((u) => ({ x: u.wx - camera.x, y: u.wy - camera.y }))
+  .filter((p) => p.x > 20 && p.x < engine.width - 20 && p.y > 20 && p.y < engine.height - 20);
+window.__strategy = {
+  // all-lazy: the sciences block declares below this point (TDZ otherwise)
+  techWin: () => techWin,
+  talents: () => talents,
+  rank: (id) => talents.pane('sciences').getRank(id),
+  talentPoints: () => talents.points,
+  header: () => techWin.header,
+  bellsPlate: () => talents.pane('sciences')._plates.get('bells'),
+  picked: () => pickedAllies().length,
+  visible: () => __onScreen().length,
+  marqueeFrom: () => ({ x: Math.max(4, Math.min(...__onScreen().map((p) => p.x)) - 40),
+                        y: Math.max(4, Math.min(...__onScreen().map((p) => p.y)) - 40) }),
+  marqueeTo: () => ({ x: Math.min(engine.width - 4, Math.max(...__onScreen().map((p) => p.x)) + 44),
+                      y: Math.min(engine.height - 4, Math.max(...__onScreen().map((p) => p.y)) + 44) }),
+  targets: () => pickedAllies().map((u) => Math.round(u.tx)).join(','),
+  logCount: () => warlog.entries.length,
+  rate: () => rate,
+};
+
+// Right-click on EMPTY ground is the order. It has to come off the bus: `rightclick`
+// is only dispatched when the press landed on a node (input.js), and empty stone is
+// deliberately not a node here - a full-screen ground catcher would also stop the
+// marquee arming, which only fires when the hit target is null.
+//
+// THIS PAGE CARRIES NO RADIAL: "any demo that has
+// right-click behavior like this doesn't need a radial." The right button
+// BELONGS to the genre here — it orders the muster — and a wheel sharing the
+// button ('s selection partition, then 's target partition) only ever
+// confused the verb. The wheel's errands were always duplicates of controls
+// the page owns: the marquee musters, W raises the sciences, the SpeedControl
+// sets the tempo. Pages whose right button means nothing keep their wheels.
+const offOrder = engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  const sel = pickedAllies();
+  if (!sel.length) return;
+  orderTo(sel, e.x + camera.x, e.y + camera.y);
+  EldNotify.send({ channel: 'log', title: `${sel.length} thrall${sel.length > 1 ? 's' : ''} move out.` });
+  tickObjective('order');
+});
+// The native menu is off CANVAS-WIDE via init({ contextMenu: false }) — the
+// ORDER needs the suppression (the engine listener unwinds with the engine;
+// offOrder is engine-owned bus state and dies the same way).
+void offOrder;
+
+// ---- the marquee: the library narrates the rect, the page owns the entities ----
+const marquee = new SelectionMarquee({
+  onSelect: (r) => {
+    for (const u of livingAllies()) {
+      const sx = u.wx - camera.x, sy = u.wy - camera.y;
+      const inside = sx >= r.x && sx <= r.x + r.w && sy >= r.y - TOKEN && sy <= r.y + r.h;
+      u.picked = r.shift ? (u.picked || inside) : inside;
+    }
+    repaintPicks();
+  },
+});
+engine.layers.ghost.add(marquee);
+
+// ---------------------------------------------------------------- the ledger
+const resources = new ResourceBar({ chips: [
+  { icon: 'book', value: 320, cap: 1000, warnAt: 50, width: 130 },
+  { icon: 'deathkiss', value: 64, cap: 200, width: 120 },
+], gap: 10 });
+engine.layers.background.add(resources);
+const [essenceChip, dreadChip] = resources.chips;
+EldTooltip.attach(essenceChip, { title: 'Essence', desc: 'Plus twelve each turn from the drowned tithes.' });
+EldTooltip.attach(dreadChip, { title: 'Dread', desc: 'Plus three each turn while the bell still stands.' });
+const purse = { essence: 320, dread: 64 };
+function spend(n) {
+  if (purse.essence < n) { EldNotify.send({ channel: 'log', title: 'Not enough essence.' }); return false; }
+  purse.essence -= n;
+  essenceChip.setValue(purse.essence);
+  return true;
+}
+
+// ---------------------------------------------------------------- the queue
+let pending = [{ id: 'ghoul', icon: 'deathkiss', count: 2 }, { id: 'obelisk', icon: 'book' }];
+const queue = new BuildQueue({
+  slots: 5,
+  onCancel: (v, e) => {
+    pending.splice(e.index, 1);
+    queue.setQueue(pending);
+    EldNotify.send({ channel: 'log', title: `Unmade the ${e.id}.` });
+  },
+});
+queue.setQueue(pending);
+let grind = 0;
+
+// The queue is the only thing that puts new bodies on the field, and the only thing
+// that raises the obelisk - which is what un-seals the Stillness command. The page
+// teaches itself instead of shipping a button that fakes the result.
+function queueComplete(done) {
+  if (done.id === 'obelisk') {
+    obeliskBuilt = true;
+    paintCoast();
+    card.setCommandDisabled('still', false);
+    EldNotify.send({ channel: 'toast', title: 'The Obelisk stands', message: 'Stillness may be called.' });
+    EldNotify.send({ channel: 'log', title: 'The Stillness Obelisk is raised.' });
+  } else {
+    const spot = MUSTER[units.length % MUSTER.length];
+    const u = spawnUnit('ally', FERRY.x, FERRY.y);
+    orderTo([u], spot[0], spot[1]);
+    placeUnits();
+    EldNotify.send({ channel: 'toast', title: 'Raised', message: `The ${done.id} comes up the causeway.` });
+    tickObjective('raise');
+  }
+}
+
+// ---------------------------------------------------------------- the card
+const card = new CommandCard({
+  commands: [
+    { id: 'raise', icon: 'shield', hotkey: 'Q', cost: 50 },
+    { id: 'raze', icon: 'fireball', hotkey: 'W', cost: 120 },
+    { id: 'rally', icon: 'arrows', hotkey: 'E' },
+    { id: 'still', icon: 'book', label: 'Stillness', disabled: true,
+      reason: 'Requires a Stillness Obelisk on the field.' },
+  ],
+  units: [],
+  cols: 4,
+  onCommand: (v, e) => {
+    if (e.id === 'raise') {
+      if (!spend(50)) return;
+      pending.push({ id: 'ghoul', icon: 'deathkiss' });
+      queue.setQueue(pending);
+      EldNotify.send({ channel: 'log', title: 'A ghoul is called for.' });
+      return;
+    }
+    if (e.id === 'raze') {
+      const sel = pickedAllies();
+      if (!sel.length) { EldNotify.send({ channel: 'log', title: 'Nothing is selected to send.' }); return; }
+      if (!spend(120)) return;
+      const ruin = STRUCTURES.find((s) => s.kind === 'ruin');
+      orderTo(sel, ruin.x + ruin.w / 2, ruin.y + ruin.h + 26);
+      map.ping(ruin.x + ruin.w / 2, ruin.y);
+      EldNotify.send({ channel: 'log', title: 'Command: raze the old hall.' });
+      return;
+    }
+    if (e.id === 'rally') {
+      orderTo(livingAllies(), BELL.x, BELL.y + 120);
+      map.ping(BELL.x, BELL.y);
+      EldNotify.send({ channel: 'log', title: 'Command: rally to the bell.' });
+      return;
+    }
+    purse.dread = Math.min(200, purse.dread + 12);
+    dreadChip.setValue(purse.dread);
+    EldNotify.send({ channel: 'log', title: 'Stillness settles over the coast.' });
+  },
+});
+engine.layers.background.add(card, queue);
+
+// ---------------------------------------------------------------- the map
+// The terrain painter draws the SAME coast the field does, at map scale, so the two
+// views agree - the old page painted an unrelated blue-over-green rectangle.
+const map = new TacticalMap({
+  width: 220, height: 150, world: WORLD,
+  terrain: (ctx, w, h) => {
+    const sx = w / WORLD.w, sy = h / WORLD.h;
+    ctx.fillStyle = '#0a1310';
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#0c1c22';
+    ctx.fillRect(0, 0, w, SHORE_Y * sy);
+    ctx.strokeStyle = 'rgba(160,215,190,0.35)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, SHORE_Y * sy); ctx.lineTo(w, SHORE_Y * sy); ctx.stroke();
+    ctx.strokeStyle = 'rgba(70,84,74,0.7)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(FERRY.x * sx, FERRY.y * sy);
+    ctx.quadraticCurveTo(1420 * sx, 700 * sy, BELL.x * sx, (BELL.y + 90) * sy);
+    ctx.stroke();
+    for (const s of STRUCTURES) {
+      ctx.fillStyle = s.kind === 'ruin' ? '#1a1e1c' : '#454e47';
+      ctx.fillRect(s.x * sx, s.y * sy, Math.max(2, s.w * sx), Math.max(2, s.h * sy));
+    }
+  },
+  onMove: (v, e) => moveCamera(e.x - camera.w / 2, e.y - camera.h / 2),
+});
+engine.layers.background.add(map);
+
+function moveCamera(x, y) {
+  camera.x = Math.max(0, Math.min(Math.max(0, WORLD.w - camera.w), x));
+  camera.y = Math.max(0, Math.min(Math.max(0, WORLD.h - camera.h), y));
+  map.setViewport(camera);
+  paintCoast();
+  placeUnits();
+}
+
+// ---------------------------------------------------------------- the war log
+// 300x110 -> 400x200 @("the text input/output size is so small
+// that it is unusable" — 110 tall showed ~5 rows and ~18 characters of message).
+// The wrap law shows order confirmations whole now; 400 wide still clears the
+// centered command card (its left edge rests ~x500 at the 1280 frame) and
+// the taller box still clears the Field Orders window above (bottom ~y268).
+const warlog = new EventLog({ width: 400, height: 200, resizable: { corner: 'tr', minW: 280, minH: 120 } });
+engine.layers.background.add(warlog);
+if (FROZEN) {
+  warlog.append('[--:--:--]', 'NOTIFY', 'The war table is set.');
+  warlog.append('[--:--:--]', 'NOTIFY', 'Ten thralls hold the muster ground.');
+} else {
+  EldNotify.send({ channel: 'log', title: 'The war table is set.' });
+}
+
+// ---------------------------------------------------------------- the orders
+// The legend is LIVE: each line ticks itself off when you actually do the thing, so
+// the panel is a tutorial that reads the game rather than three static bullets.
+const OBJECTIVES = [
+  { id: 'muster', text: 'Take a group: drag across empty ground.' },
+  { id: 'order', text: 'Send them: right-click where they should stand.' },
+  { id: 'raise', text: 'Raise a ghoul from the tithe (Q).' },
+  { id: 'bell', text: 'Answer the west bell.' },
+];
+const objectiveNodes = new Map();
+function tickObjective(id) {
+  const o = OBJECTIVES.find((x) => x.id === id);
+  if (!o || o.done) return;
+  o.done = true;
+  const n = objectiveNodes.get(id);
+  if (n) { n.setText(`[x] ${o.text}`); n.setColor(COLORS.positive); }
+  EldNotify.send({ channel: 'log', title: `Order kept: ${o.text}` });
+  if (OBJECTIVES.every((x) => x.done)) {
+    EldNotify.send({ channel: 'toast', title: 'The coast is held', message: 'For tonight.', variant: 'achievement' });
+  }
+}
+const ordersWin = EldWindow.create({
+  title: 'Field Orders', x: 16, y: 48,
+  content: (c) => {
+    const root = new VBox({ padding: { t: 8, r: 8, b: 0, l: 8 }, gap: 6, minW: 330 }); // roots claim ink (law)
+    for (const o of OBJECTIVES) {
+      const n = new TextNode(`[ ] ${o.text}`, { size: 12, color: COLORS.textMuted, shadow });
+      objectiveNodes.set(o.id, n);
+      root.add(n);
+    }
+    c.add(root);
+  },
+});
+
+let rate = 1;
+const speed = SpeedControl({ value: 1, width: 200, onChange: (v) => { rate = v; } });
+engine.layers.background.add(speed);
+
+// ---------------------------------------------------------------- the sciences
+// the Forbidden Sciences are a TALENT pane (the WoW-Classic law).
+// Research is an INSTANT spend from a pool of insight — the coast banks five at
+// boot and each rising tide grants one more. Left-click learns a rank,
+// right-click unlearns under the legality oracle (and the grid consumes the
+// gesture — no wheel over the sciences), tier 2 opens at five points in the
+// tree, and the grave rites demand a MAXED brine (the golden arrow shows it).
+let talents = null; // module handle: the suite and the input replay walk the sciences
+const techWin = EldWindow.create({
+  title: 'Forbidden Sciences',
+  x: 690, y: 90, // size omitted: the window MEASURES the pane
+  content: (c) => {
+    const tp = talents = new TalentPanes({
+      // The requirement: too few points and too shallow a tree — so the
+      // coast banks FIFTEEN at boot — enough to open tiers and walk real
+      // branches — and the tide still teaches one more per wave. Ten sciences
+      // over three chains now: the tithe ledgers, the bell rites, the salt
+      // wards — plus the lens with no prerequisite and the abyss capstone
+      // that demands a maxed grave rite over fifteen in-tree.
+      points: 15,
+      panes: [{ id: 'sciences', data: { name: 'Sciences', talents: [
+        { id: 'tithe', icon: 'book', tier: 1, col: 0, maxRank: 2 },
+        { id: 'bells', icon: 'blindinglight', tier: 1, col: 1, maxRank: 3 },
+        { id: 'lens', icon: 'blindinglight', tier: 1, col: 2, maxRank: 2 },
+        { id: 'ledger', icon: 'book', tier: 2, col: 0, maxRank: 2, requires: 'tithe' },
+        { id: 'brine', icon: 'leafs', tier: 2, col: 1, maxRank: 3, requires: 'bells' },
+        { id: 'salt', icon: 'shield', tier: 2, col: 2, maxRank: 2 },
+        { id: 'hymn', icon: 'book', tier: 3, col: 0, maxRank: 2, requires: 'ledger' },
+        { id: 'graves', icon: 'deathkiss', tier: 3, col: 1, maxRank: 1, requires: 'brine' },
+        { id: 'wards', icon: 'shield', tier: 3, col: 2, maxRank: 3, requires: 'salt' },
+        { id: 'abyss', icon: 'fireball', tier: 4, col: 1, maxRank: 1, requires: 'graves' },
+      ] } }],
+      onSpend: (e) => {
+        EldNotify.send({ channel: 'log', title: `Learned: ${e.id}, rank ${e.rank}.` });
+        if (tp.pane('sciences').getState(e.id) === 'maxed') {
+          EldNotify.send({ channel: 'toast', title: 'Science mastered', message: e.id });
+        }
+      },
+    });
+    c.add(tp);
+  },
+});
+
+// ---------------------------------------------------------------- the tide
+// The wave is the event both effects hang off: it pings the map because something
+// arrived there, and raises the banner because the coast is in trouble. Neither is
+// summoned by a button any more.
+let waveNo = 0;
+function tideRises() {
+  waveNo++;
+  // the tide TEACHES: every wave that comes ashore banks one insight (loud —
+  // the sciences header follows), so research is paid for by weathering
+  talents.setPoints(talents.points + 1, { silent: false });
+  const at = { x: 820 + ((waveNo * 337) % 700), y: SHORE_Y + 30 };
+  map.ping(at.x, at.y);
+  EldNotify.send({
+    channel: 'banner', priority: 9,
+    title: 'THE TIDE ANSWERS',
+    message: `Shapes come ashore, wave ${waveNo}.`,
+  });
+  EldNotify.send({ channel: 'log', title: `Wave ${waveNo} makes the shingle.` });
+  for (let i = 0; i < 2 + (waveNo % 2); i++) {
+    const e = spawnUnit('enemy', at.x + i * 34 - 34, at.y + (i % 2) * 18);
+    e.tx = BELL.x + i * 26 - 26;
+    e.ty = BELL.y + 130;
+  }
+  placeUnits();
+  return at;
+}
+
+// ---------------------------------------------------------------- the clock
+let tideAcc = 0, incomeAcc = 0, fightAcc = 0;
+engine.ticker.add((dtRaw) => {
+  if (INSTRUMENTED) return;
+  const dt = dtRaw * rate;
+  if (dt > 0) stepWorld(dt);
+});
+
+function stepWorld(dt) {
+  // walk everyone toward their order
+  for (const u of units) {
+    if (u.dead) continue;
+    const dx = u.tx - u.wx, dy = u.ty - u.wy;
+    const d = Math.hypot(dx, dy);
+    if (d > 1.5) {
+      const k = Math.min(1, ((u.side === 'ally' ? 74 : 52) * dt) / d);
+      u.wx += dx * k; u.wy += dy * k;
+    }
+  }
+  placeUnits();
+
+  // the bell objective reads the world, not a button
+  if (livingAllies().some((u) => Math.hypot(u.wx - BELL.x, u.wy - (BELL.y + 120)) < 90)) tickObjective('bell');
+
+  // the queue grinds
+  if (pending.length) {
+    grind += dt * 0.25;
+    if (grind >= 1) { grind = 0; queueComplete(pending.shift()); queue.setQueue(pending); }
+    queue.setProgress(grind);
+  } else { queue.setProgress(0); }
+
+  // income
+  incomeAcc += dt;
+  if (incomeAcc >= 4) {
+    incomeAcc = 0;
+    purse.essence = Math.min(1000, purse.essence + 12);
+    purse.dread = Math.min(200, purse.dread + 3);
+    essenceChip.setValue(purse.essence);
+    dreadChip.setValue(purse.dread);
+  }
+
+  // the tide
+  tideAcc += dt;
+  if (tideAcc >= 26) { tideAcc = 0; tideRises(); }
+
+  // the meeting: anything within reach trades, and the loser leaves the field
+  fightAcc += dt;
+  if (fightAcc >= 0.9) {
+    fightAcc = 0;
+    for (const e of units) {
+      if (e.dead || e.side !== 'enemy') continue;
+      const near = livingAllies().find((a) => Math.hypot(a.wx - e.wx, a.wy - e.wy) < 40);
+      if (!near) continue;
+      e.hp -= 1; near.hp -= 1;
+      if (e.hp <= 0) fell(e);
+      if (near.hp <= 0) fell(near);
+    }
+  }
+}
+
+function fell(u) {
+  u.dead = true;
+  u.picked = false;
+  u.ring.visible = false;
+  u.q.setBaseOpacity(0.25);
+  u.q.setColor(COLORS.stoneMid);
+  u.q.interactive = false;
+  EldNotify.send({ channel: 'log', title: u.side === 'ally' ? 'A thrall goes down.' : 'A shape is put back in the water.' });
+  repaintPicks();
+}
+
+// ---------------------------------------------------------------- the frame
+const hud = new UINode({ name: 'hud-chrome' });
+engine.layers.background.add(hud);
+hud.onLayout = function () {
+  const W = engine.width, H = engine.height;
+  camera.w = W; camera.h = H;
+  camera.x = Math.max(0, Math.min(Math.max(0, WORLD.w - W), camera.x));
+  camera.y = Math.max(0, Math.min(Math.max(0, WORLD.h - H), camera.y));
+  // `ground` and `field` stay ZERO-SIZED grouping nodes: the overlap rule compares a
+  // parent's audit-solid children pairwise, and a full-screen wrapper sitting beside
+  // the HUD widgets on the background layer overlaps every one of them (13 violations,
+  // measured). Zero area drops out of the kids filter (audit.js isAuditSolid /
+  // MIN_AREA) while the children still paint at their own explicit coordinates.
+  bdQuad.setRect(0, 0, W, H);
+  paintCoast();
+  placeUnits();
+  map.setViewport(camera);
+
+  resources.setPos(16, 12);
+  speed.setPos(W - speed.w - 16, 12);
+  card.setPos(Math.round((W - card.w) / 2), H - card.h - 66);
+  queue.setPos(16, H - queue.h - 66);
+  map.setPos(W - map.w - 16, H - map.h - 66);
+  warlog.setPos(16, H - queue.h - 66 - warlog.h - 12);
+  // THE FREEDOM LAW: no element budgets the war log's
+  // grip — ResizeGrip's built-in screen-bounds ceiling is the only clamp.
+  if (!techWin.userPlaced) { // the widget's own claim flag (was a page-side _parked)
+    // the ten-science pane measures ~428x452 and the height clamp seats
+    // the window at y~40 — where the OLD x (690) ran its right edge to 1118 and
+    // the north grip strip buried the speed control's first segment (the
+    // audit's REACH row named it). x clamps at 600 now: right edge ~1028
+    // clears the speed control (1064+) AND the minimap column (1045+) at any
+    // clamped y, top and bottom bands verified at the measured size.
+    techWin.setPos(
+      Math.max(16, Math.min(600, W - techWin.w - 16)),
+      Math.max(16, Math.min(90, H - 260 - techWin.h - 8)),
+    );
+  }
+};
+map.setViewport(camera);
+
+// ---- ?assert=1: the in-page kit suite (the verbs, with fixed numbers) ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    await wait(1200);
+    // derived from the seed data, never a literal: a MUSTER edit must move both sides
+    ok('the host stands on the muster ground', livingAllies().length === MUSTER.length && units[0].q.disposed === false);
+    ok('the card knows its commands', card._plates.size === 4);
+    ok('the queue holds its work', queue.queue.length >= 1);
+
+    // the camera is ONE transform: moving it moves the map viewport AND the field
+    const sx0 = units[0].q.x;
+    moveCamera(0, 400);
+    ok('the camera moves the map and the field together',
+      map._vpEdges[0].visible === true && units[0].q.x !== sx0
+      && units[0].q.x === Math.round(units[0].wx - camera.x - TOKEN / 2));
+
+    const ping = map.ping(1000, 600);
+    ok('a ping answers', ping.disposed === false);
+
+    // the marquee narrates a rect; the page turns it into a selection
+    // The rect is derived from where the host actually IS, never from the viewport:
+    // the engine box is 1264x665 inside a 1280x760 window, and a short world clamps
+    // the camera, so a screen-sized rect legitimately missed a thrall above the view
+    // (measured 9/10). An assert that hard-codes viewport numbers tests the harness.
+    moveCamera(620, 380);
+    const sxs = livingAllies().map((u) => u.wx - camera.x);
+    const sys = livingAllies().map((u) => u.wy - camera.y);
+    const around = {
+      x: Math.min(...sxs) - 40, y: Math.min(...sys) - 40,
+      w: Math.max(...sxs) - Math.min(...sxs) + 80,
+      h: Math.max(...sys) - Math.min(...sys) + 80,
+      shift: false,
+    };
+    marquee.onSelect(around);
+    ok(`a marquee drawn around the host takes all of it [${pickedAllies().length}/${livingAllies().length}]`,
+      pickedAllies().length === 10);
+
+    // and the negative: a rect over empty ground takes nobody (a select-all that
+    // cannot deselect is the classic marquee bug)
+    marquee.onSelect({ x: around.x, y: around.y - 400, w: 60, h: 60, shift: false });
+    ok(`a marquee over empty ground takes nobody [${pickedAllies().length}]`,
+      pickedAllies().length === 0);
+    marquee.onSelect(around);
+
+    // a right-click order re-targets the selection - through the same bus path the
+    // pointer takes, because dispatch would bypass hit testing entirely
+    const before = pickedAllies().map((u) => u.tx);
+    engine.bus.emit('pointerdown', { x: 300, y: 300, button: 2, pointerId: 1, target: null, native: null });
+    ok('a right-click order re-targets the selection',
+      pickedAllies().some((u, i) => u.tx !== before[i]));
+    // the ruling: this page carries NO radial — the right button IS the
+    // order. An idle bus-null right-click does NOTHING (no wheel, no order of
+    // nobody, no shared wheel raised by any chain), and the page registers no
+    // ground with the engine.
+    for (const u of units) u.picked = false;
+    repaintPicks();
+    engine.bus.emit('pointerdown', { x: 320, y: 300, button: 2, pointerId: 2, target: null, native: null });
+    await wait(60);
+    ok('the right button belongs to the genre: an idle ground right-click raises NOTHING',
+      window.__strategy.ground === undefined
+      && (engine.radialShared?.isOpen ?? false) === false
+      && engine.radialGround === null);
+    marquee.onSelect(around); // re-muster for the steps that follow
+
+    // the design requirement: the hotkey rides the bus through the REAL command path
+    const n0 = warlog.entries.length;
+    engine.bus.emit('keydown', { key: 'e' });
+    await wait(120);
+    ok('a command lands in the mounted war log', warlog.entries.length === n0 + 1);
+
+    // the stillness loop: sealed until the obelisk the queue builds actually exists
+    const sealed = card._plates.get('still') ? card._plates.get('still').disabled === true : false;
+    queueComplete({ id: 'obelisk', icon: 'book' });
+    await wait(80);
+    const stillPlate = card._plates.get('still');
+    ok('finishing the obelisk un-seals Stillness',
+      sealed === true && obeliskBuilt === true && stillPlate != null && stillPlate.disabled === false);
+
+    // hit-reach: the REAL probe answers for the command card (dispatch blind spot)
+    const hitCard = hitTest(engine, card.worldX + card.w / 2, card.worldY + card.h / 2);
+    ok('hit-reach: the command card answers the real hit probe',
+      hitCard === card || (card.isAncestorOf ? card.isAncestorOf(hitCard) : false));
+
+    // and for the open window: the sciences stand on the `windows` band OVER a HUD
+    // that lives on `background` — the exact layering the overlay-over-windows
+    // defect class buried on two other pages. The real probe proves the stack.
+    const hitTech = hitTest(engine, techWin.worldX + techWin.w / 2, techWin.worldY + techWin.h / 2);
+    ok('hit-reach: the sciences window answers the real hit probe over the HUD',
+      hitTech === techWin || (techWin.isAncestorOf ? techWin.isAncestorOf(hitTech) : false));
+
+    // the sciences answer the pointer (the WoW law): a click LEARNS the
+    // instant it lands, ranks climb on the badge, the sealed grave rites explain
+    // themselves in red, and a right-click UNLEARNS — consumed by the grid, so
+    // no wheel ever opens over the sciences
+    const sci = talents.pane('sciences');
+    const pool20 = talents.points;
+    let learned20 = 0;
+    const offLearn20 = talents.on('spend', () => learned20++);
+    sci._plates.get('bells').dispatch('click', {});
+    ok('a click learns the instant it lands — rank 1, one insight paid',
+      learned20 === 1 && sci.getRank('bells') === 1 && talents.points === pool20 - 1);
+    sci._plates.get('bells').dispatch('click', {});
+    ok('ranks climb and the badge follows: bells 2/3',
+      sci.getRank('bells') === 2 && sci._plates.get('bells').badge._text === '2/3');
+    ok('the grave rites stay sealed until ten points and a maxed brine — the red lines say so',
+      sci.getState('graves') === 'locked-tier'
+      && sci._tooltipOf(sci._byId.get('graves')).lines.some((l) => l.color === COLORS.negative));
+    ok('the wall demos ten sciences over three chains, and the abyss waits behind fifteen (the charge)',
+      sci._plates.size === 10 && sci.getState('abyss') === 'locked-tier'
+      && sci._byId.get('abyss').requires === 'graves');
+    const evSci = sci._plates.get('bells').dispatch('rightclick', { x: 0, y: 0 });
+    ok('a right-click unlearns one rank and the grid consumes the gesture (no wheel over the grid)',
+      sci.getRank('bells') === 1 && evSci.defaultPrevented === true
+      && (engine.radialShared?.isOpen ?? false) === false);
+    sci._plates.get('bells').dispatch('click', {});
+    offLearn20();
+
+    // the ping decays and the obelisk toast (4s + fade) clears before the audit
+    // reads the scene — reach now runs too, and a live toast legitimately covers
+    // the speed control beneath it until its clock runs out
+    await wait(5200);
+    const audit = runAudit(engine);
+    const cts = audit.counts;
+    const v0 = audit.violations[0];
+    ok(`the page audits clean on every rule${v0 ? ` [${v0.rule} ${v0.path} ${v0.detail ?? ''}]` : ''}`,
+      Object.values(cts).reduce((a, b) => a + b, 0) === 0);
+
+    // last: the banner is a live overlay - it must not sit under the audit
+    tideRises();
+    await wait(200);
+    ok('the tide raises the banner and lands enemies on the shingle',
+      EldNotify._banner != null && units.some((u) => u.side === 'enemy'));
+
+    ok('the whole command ran without a single page error', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `STRATEGYHUD ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+} else {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'STRATEGYHUD READY';
+  }, 1000);
+}
+</script>
+</body>
+</html>

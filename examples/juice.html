@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Juice</title>
+<!-- @demo   Choreography and echoes: the transition gallery, a stagger playground, the sound map, and notify routing, set out on a rehearsal stage.
+     @shows  animateIn, animateOut, stagger, EldNotify, EldWindow, RadialMenu, Button, Slider, ToggleLabel, EventLog, VBox, HBox, GridBox, UINode, NineSliceNode, QuadNode, TextNode
+     @params ?freeze=1 — bit-stable snapshot boot (no ambiance, seeded stream lines) · ?assert=1 — the in-page suite titles its own PASS count -->
+
+<!-- the proof page, rebuilt on the layout engine. Window one cycles a stone
+     plate through the four presets on an honest GridBox column and gates them with
+     Eldritch.reducedMotion; window two staggers a row with a live gap slider; window
+     three maps every uisound kind to a WebAudio oscillator beep (the library ships
+     ZERO audio — the page synthesizes its own) and streams the kinds; window four
+     routes notifications: priorities, a keyed collapse, the banner, log-only, and
+     do-not-disturb. All four windows measure their own content; animated plates
+     live inside fixed stage cells because the presets invalidate layout — a
+     box-managed plate would be re-seated mid-flight. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+// Boot-health protocol: any error surfaces in the title so headless DOM dumps can gate
+// on it (the page manifest lists this page as READY). Hooks must precede the module script.
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {
+  Eldritch, EldWindow, EldNotify, EldToast, EldEvents,
+  animateIn, animateOut, stagger,
+  Button, Slider, ToggleLabel, EventLog, RadialMenu,
+  VBox, HBox, GridBox, Spacer,
+  UINode, NineSliceNode, QuadNode, TextNode,
+  runAudit, hitTest, COLORS, FONTS,
+} from '../src/lovecraft-ui.js';
+
+// ?freeze=1 (snapshots) and ?assert=1 (the in-page suite) both need real frames
+// under headless dump-dom, where rAF never fires — the timer-driven clock
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+
+// the icon pack: the procedural ability art died — the REAL icons
+// re-skin these names in place; fallback 'none' keeps the loud plate when
+// assets/ is absent, and FROZEN skips the async decode (the frozen-shelf law)
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-0489', as: 'blindinglight' },
+      { id: 'ico-3649', as: 'book' },
+      { id: 'ico-0394', as: 'deathkiss' },
+    ],
+  });
+}
+
+window.engine = engine;
+
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+
+// ---- the rehearsal stage: ONE page-owned canvas, registry-free ----
+// This is a page about motion, and it played on #04060a. The instruments below are
+// unchanged; they are now standing in the room where a company would rehearse.
+const stage3d = new UINode({ name: 'rehearsal-stage' });
+const gCanvas = document.createElement('canvas');
+const gTex = new THREE.CanvasTexture(gCanvas);
+gTex.colorSpace = THREE.SRGBColorSpace;
+gTex.minFilter = THREE.LinearFilter;
+gTex.magFilter = THREE.LinearFilter;
+gTex.generateMipmaps = false;
+const gQuad = new QuadNode({ texture: gTex });
+stage3d.add(gQuad);
+engine.layers.background.add(stage3d);
+stage3d.on('dispose', () => gTex.dispose());
+const srnd = (n) => { let s = n; return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff; };
+
+function paintStage() {
+  const W = Math.max(2, Math.round(engine.width)), H = Math.max(2, Math.round(engine.height));
+  if (gCanvas.width !== W || gCanvas.height !== H) { gCanvas.width = W; gCanvas.height = H; }
+  const ctx = gCanvas.getContext('2d');
+  const deck = Math.round(H * 0.52);        // where the back wall meets the boards
+
+  // the back wall, and the boards it stands on
+  const back = ctx.createLinearGradient(0, 0, 0, deck);
+  back.addColorStop(0, '#070a0b');
+  back.addColorStop(1, '#101617');
+  ctx.fillStyle = back;
+  ctx.fillRect(0, 0, W, deck);
+  ctx.fillStyle = '#120e0b';
+  ctx.fillRect(0, deck, W, H - deck);
+
+  // boards running away from the viewer: spacing widens toward the front so the
+  // plane agrees with the painted meeting line instead of floating over it
+  const r = srnd(3821);
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1;
+  for (let i = 1; i < 16; i++) {
+    const t = i / 16;
+    const y = Math.round(deck + Math.pow(t, 1.7) * (H - deck)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  for (let x = -20; x < W; x += 104) {
+    ctx.fillStyle = `rgba(28,21,16,${0.5 + r() * 0.5})`;
+    ctx.fillRect(x, deck, 104, H - deck);
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x + 1, deck); ctx.lineTo(x + 1, H); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, deck - 4, W, 8);
+
+  // the gantry, and three lanterns throwing cones onto the deck
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, Math.round(H * 0.045), W, 16);
+  ctx.strokeStyle = 'rgba(88,100,96,0.10)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, Math.round(H * 0.045) + 15.5); ctx.lineTo(W, Math.round(H * 0.045) + 15.5); ctx.stroke();
+  for (const f of [0.30, 0.50, 0.70]) {
+    const lx = Math.round(W * f), ly = Math.round(H * 0.045) + 16;
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.beginPath();
+    ctx.moveTo(lx - 13, ly + 20); ctx.lineTo(lx + 13, ly + 20);
+    ctx.lineTo(lx + 6, ly); ctx.lineTo(lx - 6, ly);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(238,220,150,0.30)';
+    ctx.fillRect(lx - 8, ly + 18, 16, 3);
+    const cone = ctx.createLinearGradient(lx, ly + 20, lx, H);
+    cone.addColorStop(0, 'rgba(238,220,150,0.075)');
+    cone.addColorStop(0.6, 'rgba(238,220,150,0.022)');
+    cone.addColorStop(1, 'rgba(238,220,150,0)');
+    ctx.fillStyle = cone;
+    ctx.beginPath();
+    ctx.moveTo(lx - 12, ly + 20); ctx.lineTo(lx + 12, ly + 20);
+    ctx.lineTo(lx + 150, H); ctx.lineTo(lx - 150, H);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // a coil of rope and a sandbag against the back wall, stage left
+  const rx = Math.round(W * 0.115), ry = deck - 10;
+  ctx.strokeStyle = 'rgba(112,98,70,0.16)'; ctx.lineWidth = 3;
+  for (let i = 0; i < 4; i++) {
+    ctx.beginPath(); ctx.ellipse(rx, ry - i * 4, 26 - i * 3, 9 - i, 0, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.beginPath(); ctx.ellipse(Math.round(W * 0.88), deck - 6, 30, 12, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(38,34,26,0.75)';
+  ctx.fillRect(Math.round(W * 0.88) - 22, deck - 52, 44, 46);
+  ctx.strokeStyle = 'rgba(96,88,66,0.12)'; ctx.lineWidth = 1;
+  ctx.strokeRect(Math.round(W * 0.88) - 21.5, deck - 51.5, 43, 45);
+
+  gTex.needsUpdate = true;
+}
+// ZERO-SIZED wrapper: a sized full-screen node overlaps every sibling in the census.
+stage3d.onLayout = function () {
+  gQuad.setRect(0, 0, Math.round(engine.width), Math.round(engine.height));
+  paintStage();
+};
+
+// A carved stone plate with a centered rune — the animation subject on this page.
+const makePlate = (label, w = 120, h = 80, { font = FONTS.header, size = 14, smallCaps = true, letterSpacing = 2 } = {}) => {
+  const plate = new UINode({});
+  const stone = new NineSliceNode(engine.textures.frame('panel.dark'));
+  stone.setRect(0, 0, w, h);
+  const rune = new TextNode(label, { font, size, smallCaps, letterSpacing, color: COLORS.accent, shadow });
+  rune.setPos(Math.round((w - rune.w) / 2), Math.round((h - rune.h) / 2));
+  plate.add(stone, rune);
+  plate.setSize(w, h);
+  return plate;
+};
+
+// ---- window one: the transition gallery ----
+// the preset column rides a stretch GridBox — uniform, honest button widths (the
+// old hand-rolled 112px stride overlapped 'fadeScale'/'stoneSlide', the census's last
+// count). The plate lives inside a FIXED stage cell: boxes position the cell, the
+// presets tween the plate. (Since presets ride render-only fx offsets, so even
+// a box-managed plate would slide correctly — the fixed cell stays for clarity)
+let gallery = null;
+const galleryWin = EldWindow.create({
+  title: 'The Gallery of Motion', x: 30, y: 56,
+  content: (c, win) => {
+    const stage = new UINode({});
+    stage.setSize(140, 88);
+    const plate = makePlate('R’LYEH');
+    plate.setPos(10, 4);
+    stage.add(plate);
+    const stageRow = new HBox({ justify: 'center' });
+    stageRow.add(stage);
+
+    let busy = false;
+    let flight = Promise.resolve();
+    const cycle = (preset) => {
+      if (busy) return flight; // one flight at a time; a superseding call would snap anyway
+      busy = true;
+      flight = (async () => {
+        await animateOut(plate, preset);
+        await animateIn(plate, preset);
+        busy = false;
+      })();
+      return flight;
+    };
+    const grid = new GridBox({ cols: 2, gap: 8, align: 'stretch' });
+    const buttons = ['rise', 'fall', 'fadeScale', 'stoneSlide'].map((preset) => {
+      const b = new Button(preset, { minWidth: 104 });
+      b.on('click', () => cycle(preset));
+      grid.add(b);
+      return b;
+    });
+
+    const gridRow = new HBox({ justify: 'center' });
+    gridRow.add(grid);
+
+    const spawn = new Button('Transient Window', { minWidth: 150 });
+    spawn.on('click', () => {
+      EldWindow.create({
+        title: 'Fleeting', x: win.x + 120, y: win.y + 80, transitions: true,
+        content: (fc) => {
+          const inner = new VBox({ padding: { t: 14, r: 14, b: 0, l: 14 } }); // roots claim ink
+          inner.add(makePlate('PH’NGLUI', 150, 84));
+          fc.add(inner);
+        },
+      });
+    });
+    const rm = new ToggleLabel('Reduced motion', {
+      checked: Eldritch.reducedMotion,
+      onChange: (v) => { Eldritch.reducedMotion = v; },
+    });
+    const bottomRow = new HBox({ gap: 10, align: 'center' });
+    bottomRow.add(spawn, new Spacer(), rm);
+
+    // content roots claim INK, the window supplies the breathing: a
+    // root's bottom padding read as scroll range when a shrink cut into it —
+    // the phantom-range audit caught the class on this page's resize walk
+    const root = new VBox({ padding: { t: 8, r: 8, b: 0, l: 8 }, gap: 12, align: 'stretch' });
+    root.add(stageRow, gridRow, bottomRow);
+    c.add(root);
+    gallery = { win, plate, cycle, buttons };
+  },
+});
+
+// ---- window two: the stagger playground ----
+let procession = null;
+const processionWin = EldWindow.create({
+  title: 'The Procession', x: 30, y: 392,
+  content: (c) => {
+    const row = new HBox({ gap: 10 });
+    const plates = [0, 1, 2, 3, 4, 5].map((i) => {
+      const cell = new UINode({});
+      cell.setSize(56, 56);
+      const p = makePlate(String(i + 1), 56, 56, { font: FONTS.mono, size: 16, smallCaps: false, letterSpacing: 0 });
+      cell.add(p);
+      row.add(cell);
+      return p;
+    });
+
+    let gap = 0.08;
+    const replay = async () => {
+      plates.forEach((p) => { p.visible = false; });
+      await stagger(plates, 'rise', { gap });
+    };
+    const replayBtn = new Button('Replay', { minWidth: 120 });
+    replayBtn.on('click', replay);
+
+    const gapLabel = new TextNode('Gap 0.08s', { size: 12, color: COLORS.textMuted, shadow });
+    const gapSlider = new Slider({
+      min: 0.02, max: 0.2, step: 0.02, value: gap, width: 180,
+      onInput: (v) => { gap = v; gapLabel.setText(`Gap ${v.toFixed(2)}s`); },
+    });
+    const sliderCol = new VBox({ gap: 4 });
+    sliderCol.add(gapLabel, gapSlider);
+    const controls = new HBox({ gap: 16, align: 'center' });
+    controls.add(replayBtn, sliderCol);
+
+    const root = new VBox({ padding: { t: 8, r: 8, b: 0, l: 8 }, gap: 14 }); // roots claim ink
+    root.add(row, controls);
+    c.add(root);
+    procession = { plates, replay };
+  },
+});
+
+// ---- window three: the sound map (WebAudio oscillator — zero assets) ----
+const KIND_PITCH = {
+  click: 660, hover: 980, open: 520, close: 392, pickup: 740, drop: 587,
+  swap: 494, error: 220, notify: 830, type: 1180, cooldown: 700, cast: 311,
+};
+let chorus = null;
+const chorusWin = EldWindow.create({
+  title: 'The Chorus', x: 520, y: 56,
+  content: (c) => {
+    let ctx = null;
+    let audible = false;
+    const beep = (kind) => {
+      if (!audible || !ctx) return;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.value = KIND_PITCH[kind] ?? 440;
+      gain.gain.setValueAtTime(0.06, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.09);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.1);
+    };
+
+    const toggle = new ToggleLabel('Audible', {
+      checked: false,
+      onChange: (v) => {
+        audible = v;
+        if (v && !ctx) ctx = new AudioContext(); // created on the gesture, as browsers require
+      },
+    });
+
+    const kindList = new TextNode(Object.keys(KIND_PITCH).join(' · '), {
+      size: 11, color: COLORS.textFaint, multiline: true, maxWidth: 386, shadow,
+    });
+
+    const stream = new EventLog({ width: 390, height: 170, register: false });
+
+    const root = new VBox({ padding: { t: 8, r: 8, b: 0, l: 8 }, gap: 8 }); // roots claim ink
+    root.add(toggle, kindList, stream);
+    c.add(root);
+
+    // Every uisound kind that fires anywhere on the page lands in this stream. FROZEN
+    // seeds fixed lines instead: live lines carry wall-clock stamps, and the two window
+    // 'open' sounds that land at boot would shift the bit-stable baseline.
+    if (FROZEN) {
+      stream.append('[--:--:--]', 'SOUND', 'open (520 Hz)');
+      stream.append('[--:--:--]', 'SOUND', 'click (660 Hz)');
+      stream.append('[--:--:--]', 'SOUND', 'hover (980 Hz)');
+    } else {
+      engine.bus.on('uisound', ({ kind }) => {
+        beep(kind);
+        stream.log(`${kind} (${KIND_PITCH[kind] ?? 440} Hz)`, 'SOUND');
+      });
+    }
+    chorus = { stream };
+  },
+});
+
+// ---- window four: notify routing ----
+let herald = null;
+const heraldWin = EldWindow.create({
+  title: 'The Herald', x: 520, y: 392,
+  content: (c) => {
+    let n = 0;
+    const senders = [
+      ['Toast', () => EldNotify.send({ title: 'Missive ' + (++n), message: 'A corner notification.', icon: 'book' })],
+      ['Same key ×n', () => EldNotify.send({ title: 'Whispers', key: 'whispers', message: 'Repeats collapse.', icon: 'deathkiss', duration: 6 })],
+      ['Priority 9', () => EldNotify.send({ title: 'THE GATE OPENS', priority: 9, variant: 'achievement', icon: 'blindinglight' })],
+      ['Banner', () => EldNotify.send({ channel: 'banner', title: 'The Stars Align', message: 'A center-stage banner, one at a time.' })],
+      ['Log only', () => EldNotify.send({ channel: 'log', title: 'Quiet ink', message: 'written to the trail' })],
+    ];
+    const grid = new GridBox({ cols: 2, gap: 8, align: 'stretch' });
+    const send = {};
+    senders.forEach(([label, fn]) => {
+      const b = new Button(label, { minWidth: 184 });
+      b.on('click', fn);
+      grid.add(b);
+      send[label] = fn;
+    });
+    const dnd = new ToggleLabel('Do not disturb', {
+      checked: false,
+      onChange: (v) => { EldNotify.doNotDisturb = v; },
+    });
+    const root = new VBox({ padding: { t: 8, r: 8, b: 0, l: 8 }, gap: 12 }); // roots claim ink
+    root.add(grid, dnd);
+    c.add(root);
+    herald = { send };
+  },
+});
+
+// ---- the tiling: derived from the MEASURED windows (sizes are honest, so the
+// grid rides them — hand-tuned rects overlapped the moment content told the truth).
+// the four now pack to the frame's CORNERS instead of clustering top-left.
+// The old grid put everything inside x 30..965 / y 16..585, leaving a 315px right
+// column and a 115px bottom band carrying nothing at all; the stage shows through the
+// cross between them, which is negative space you can defend. Both axes still fall
+// back to the measured stack, so a 1024x640 boot packs exactly as it used to. ----
+const TILE = 16;
+const M = 26;
+const FRAME_W = Math.round(engine.width), FRAME_H = Math.round(engine.height);
+const BOTTOM = FRAME_H - 46 - 12;                   // clear of the boot taskbar
+const packRight = (win) => Math.max(M + galleryWin.w + TILE, FRAME_W - M - win.w);
+galleryWin.setPos(M, TILE);
+chorusWin.setPos(packRight(chorusWin), TILE);
+const row2 = Math.max(TILE + Math.max(galleryWin.h, chorusWin.h) + 12,
+                      BOTTOM - Math.max(processionWin.h, heraldWin.h));
+processionWin.setPos(M, row2);
+heraldWin.setPos(packRight(heraldWin), row2);
+
+window.__juice = { gallery, procession, chorus, herald, ground: () => ground };
+
+// ---- the ground circle: right-click on the stage opens the wheel —
+// the herald's channels and the procession's replay, the same verbs the
+// buttons speak.
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'herald', label: 'Herald', children: [
+ { id: 'Toast', label: 'Toast' },
+ { id: 'Banner', label: 'Banner' },
+ { id: 'Log only', label: 'Log' },
+ ] },
+ { id: 'replay', label: 'Replay' },
+ ],
+});
+ground.on('select', ({ id, path }) => {
+  if (path[0] === 'herald') herald.send[id]?.();
+  else if (id === 'replay') procession.replay();
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+
+// ---- ?assert=1: the in-page suite (behavior + key geometry, gated) ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const worldRect = (node) => ({ x: node.worldX, y: node.worldY, w: node.w, h: node.h });
+  const disjoint = (a, b) =>
+    a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
+  (async () => {
+    await wait(400); // the boxes converge and the measured windows settle
+
+    // the design requirement's named defect, dead: uniform honest widths, no pair touches
+    const bs = gallery.buttons;
+    const uniform = bs.every((b) => b.w === bs[0].w);
+    const honest = bs.every((b) => b.w >= b.label.w + 40);
+    let apart = true;
+    for (let i = 0; i < bs.length; i++) {
+      for (let j = i + 1; j < bs.length; j++) {
+        if (!disjoint(worldRect(bs[i]), worldRect(bs[j]))) apart = false;
+      }
+    }
+    const wr = worldRect(gallery.win);
+    const inside = bs.every((b) => {
+      const r = worldRect(b);
+      return r.x >= wr.x && r.y >= wr.y && r.x + r.w <= wr.x + wr.w && r.y + r.h <= wr.y + wr.h;
+    });
+    ok('the preset column holds its buttons honestly', uniform && honest && apart && inside);
+
+    // the offset contract, measured in FLIGHT: the presets ride render-only
+    // fxOffsetX/Y and never write layout x/y — but a rest-only sample of x/y is
+    // structurally unfailable (the plate sits in a fixed stage cell that nothing
+    // moves). Sample mid-air instead: layout HOLDS while the fx plane rides, and
+    // settling zeroes the fx plane exactly — both halves of the retired workaround.
+    const rest = { x: gallery.plate.x, y: gallery.plate.y };
+    const t0 = performance.now();
+    const flight = gallery.cycle('rise');
+    await wait(100); // inside the 0.2s out-leg of the cycle
+    ok('mid-flight, layout holds while the fx offset rides',
+      gallery.plate.x === rest.x && gallery.plate.y === rest.y
+      && gallery.plate.fxOffsetY !== 0);
+    await flight;
+    const dtFull = performance.now() - t0;
+    ok('cycling a preset returns the plate to rest with both fx offsets exactly zero',
+      gallery.plate.x === rest.x && gallery.plate.y === rest.y
+      && gallery.plate.fxOffsetX === 0 && gallery.plate.fxOffsetY === 0
+      && gallery.plate.visible === true && gallery.plate.fxOpacity === 1);
+
+    Eldritch.reducedMotion = true;
+    const t1 = performance.now();
+    await gallery.cycle('fadeScale');
+    const dtReduced = performance.now() - t1;
+    Eldritch.reducedMotion = false;
+    ok('reduced motion collapses the cycle to instant',
+      dtReduced < dtFull / 2 && gallery.plate.visible === true && gallery.plate.fxOpacity === 1);
+
+    const ys = procession.plates.map((p) => p.y);
+    await procession.replay();
+    ok('the stagger lands all six plates at rest',
+      procession.plates.every((p, i) => p.visible === true && p.fxOpacity === 1 && p.y === ys[i]));
+
+    const n0 = chorus.stream.entries.length;
+    engine.bus.emit('uisound', { kind: 'cast' });
+    await wait(60);
+    ok('a uisound lands in the chorus stream', chorus.stream.entries.length === n0 + 1);
+
+    // the last census count dies here: the page proves its own zero
+    await wait(200);
+    const cts = runAudit(engine).counts;
+    ok('the page audits clean on every rule',
+      Object.values(cts).reduce((a, b) => a + b, 0) === 0);
+
+    const live0 = EldToast.live.length;
+    herald.send['Toast']();
+    await wait(120);
+    const toasted = EldToast.live.length === live0 + 1;
+    herald.send['Same key ×n']();
+    await wait(80);
+    const liveKeyed = EldToast.live.length;
+    // the PRECONDITION: the keyed card must have APPEARED — the old arm
+    // proved the collapse by the absence of a thing never shown (a silent
+    // no-card send collapsed into itself). The audit's vacuous-setup class.
+    const keyedShown = liveKeyed === live0 + 2;
+    herald.send['Same key ×n']();
+    await wait(120);
+    const collapsed = EldToast.live.length === liveKeyed; // the repeat folds into the keyed card
+    EldNotify.doNotDisturb = true;
+    const liveDnd = EldToast.live.length;
+    // DND: no card rises AND the line reaches the trail (the narrative tap idiom)
+    const dndLines = [];
+    const offTap469 = EldEvents.tap((m) => dndLines.push(m));
+    herald.send['Toast']();
+    await wait(120);
+    offTap469();
+    // the line must be THE MISSIVE, not any trail traffic in the window
+    // — length > 0 passed on whatever the live page happened to log in 120ms
+    const fellToLog = EldToast.live.length === liveDnd
+      && dndLines.some((m) => String(m).includes('Missive'));
+    EldNotify.doNotDisturb = false;
+    ok('the herald routes: toast, keyed collapse (a card that truly rose), do-not-disturb into the trail',
+      toasted && keyedShown && collapsed && fellToLog);
+
+    // hit-reach: the REAL probe answers inside the gallery window (the dispatch blind spot)
+    const hitGW = hitTest(engine, galleryWin.worldX + galleryWin.w / 2, galleryWin.worldY + 14);
+    ok('hit-reach: the gallery window answers the real hit probe at its header',
+      hitGW === galleryWin || (galleryWin.isAncestorOf ? galleryWin.isAncestorOf(hitGW) : false));
+
+    // the ground circle: right-click on the stage opens the wheel, and
+    // the nested Herald>Toast pick rides the same send the button rides
+    engine.bus.emit('pointerdown', { x: 640, y: 640, button: 2, pointerId: 69, target: null, native: null });
+    await wait(60);
+    ok('ground: a right-click on the stage opens the wheel',
+      window.__juice.ground().isOpen === true);
+    const toasts0 = EldToast.live.length;
+    window.__juice.ground()._setIndex(0, false); // Herald
+    window.__juice.ground().onActivate();
+    await wait(40);
+    window.__juice.ground()._setIndex(0, false); // Toast
+    window.__juice.ground().onActivate();
+    await wait(120);
+    ok('ground: the nested Toast pick lands a corner missive',
+      window.__juice.ground().isOpen === false && EldToast.live.length === toasts0 + 1);
+
+    ok('the whole rehearsal ran without a single page error', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `JUICE ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+} else {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'JUICE READY';
+  }, 1000);
+}
+</script>
+</body>
+</html>

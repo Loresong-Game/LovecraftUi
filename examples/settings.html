@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Settings</title>
+<!-- @demo   A real settings screen: tabs, keybinds with conflicts, apply/revert, persistence — opened over a keeper's cabin.
+     @shows  Tabs, Form, KeybindField, Slider, Select, ToggleLabel, RadioLabel, RadialMenu, Button, EldPopup, EldToast, UINode, QuadNode
+     @params ?freeze=1 — bit-stable snapshot boot · ?assert=1 — the in-page suite titles its own PASS count -->
+
+<!-- The keyboard showcase (the page builds its first gated suite): a real
+     settings screen — Tabs, every form widget, KeybindFields with conflict
+     detection, Apply/Revert with a confirm popup, and localStorage persistence.
+     Fully operable without a mouse (Tab / arrows / Enter). The suite cleans the
+     persistence key after itself: a gate run must never leak state into the next. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {
+  Eldritch, EldWindow, EldPopup, EldToast, EldEvents,
+  Button, Slider, ToggleLabel, RadioLabel, Select, KeybindField, Tabs,
+  Radio, Form, HBox, Spacer, RadialMenu, TextNode, UINode, QuadNode, COLORS, runAudit, hitTest,
+} from '../src/lovecraft-ui.js';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+window.engine = engine;
+
+// ---- the keeper's cabin: ONE page-owned canvas, registry-free ----
+// A settings screen is a panel a player opens over a game. This one was a 560x460
+// window pinned to (60, 40) with two thirds of the frame left black beside it. The
+// window is unchanged inside; it is now centred, and it is over something.
+const cabin = new UINode({ name: 'keepers-cabin' });
+const kCanvas = document.createElement('canvas');
+const kTex = new THREE.CanvasTexture(kCanvas);
+kTex.colorSpace = THREE.SRGBColorSpace;
+kTex.minFilter = THREE.LinearFilter;
+kTex.magFilter = THREE.LinearFilter;
+kTex.generateMipmaps = false;
+const kQuad = new QuadNode({ texture: kTex });
+cabin.add(kQuad);
+engine.layers.background.add(cabin);
+cabin.on('dispose', () => kTex.dispose());
+const srnd = (n) => { let s = n; return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff; };
+
+function paintCabin() {
+  const W = Math.max(2, Math.round(engine.width)), H = Math.max(2, Math.round(engine.height));
+  if (kCanvas.width !== W || kCanvas.height !== H) { kCanvas.width = W; kCanvas.height = H; }
+  const ctx = kCanvas.getContext('2d');
+  ctx.fillStyle = '#0a0c0d';
+  ctx.fillRect(0, 0, W, H);
+
+  // planked bulkhead: vertical boards, flat value, one lit edge each
+  const r = srnd(6113);
+  for (let x = -30; x < W; x += 96) {
+    ctx.fillStyle = `rgba(22,26,27,${0.86 + r() * 0.14})`;
+    ctx.fillRect(x, 0, 96, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(x + 1.5, 0); ctx.lineTo(x + 1.5, H); ctx.stroke();
+    ctx.strokeStyle = 'rgba(84,96,98,0.08)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x + 4.5, 0); ctx.lineTo(x + 4.5, H); ctx.stroke();
+  }
+  // two ribs crossing the bulkhead
+  for (const y of [Math.round(H * 0.16), Math.round(H * 0.79)]) {
+    ctx.fillStyle = 'rgba(0,0,0,0.42)';
+    ctx.fillRect(0, y, W, 26);
+    ctx.strokeStyle = 'rgba(92,104,104,0.10)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); ctx.stroke();
+  }
+
+  // the porthole, upper left, with the night sea past it
+  const px = Math.round(W * 0.115), py = Math.round(H * 0.42), pr = Math.round(Math.min(W, H) * 0.085);
+  ctx.save();
+  ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.clip();
+  ctx.fillStyle = '#060d12';
+  ctx.fillRect(px - pr, py - pr, pr * 2, pr * 2);
+  ctx.fillStyle = 'rgba(96,150,160,0.06)';
+  ctx.fillRect(px - pr, py + pr * 0.15, pr * 2, pr);
+  ctx.strokeStyle = 'rgba(150,190,196,0.10)'; ctx.lineWidth = 1;
+  const sw = srnd(2203);
+  for (let i = 0; i < 10; i++) {
+    const y = py + pr * 0.15 + sw() * pr * 0.85;
+    ctx.beginPath(); ctx.moveTo(px - pr, y); ctx.lineTo(px - pr + sw() * pr * 1.6, y); ctx.stroke();
+  }
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.lineWidth = 12;
+  ctx.beginPath(); ctx.arc(px, py, pr + 3, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = 'rgba(148,132,84,0.20)'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(px, py, pr + 4, 0, Math.PI * 2); ctx.stroke();
+  for (let i = 0; i < 6; i++) {                       // the ring's bolts
+    const a = (i / 6) * Math.PI * 2 + 0.4;
+    ctx.fillStyle = 'rgba(148,132,84,0.22)';
+    ctx.beginPath(); ctx.arc(px + Math.cos(a) * (pr + 4), py + Math.sin(a) * (pr + 4), 2.4, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // a chart pinned to the bulkhead, lower right, curling at one corner
+  const cx0 = Math.round(W * 0.83), cy0 = Math.round(H * 0.30), cw0 = Math.round(W * 0.12), chh = Math.round(H * 0.30);
+  ctx.save();
+  ctx.translate(cx0, cy0);
+  ctx.rotate(-0.035);
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(4, 5, cw0, chh);
+  ctx.fillStyle = 'rgba(56,54,44,0.40)';
+  ctx.fillRect(0, 0, cw0, chh);
+  ctx.strokeStyle = 'rgba(140,132,110,0.11)'; ctx.lineWidth = 1;
+  const ch = srnd(9311);
+  ctx.beginPath();
+  for (let i = 0; i <= 9; i++) {                      // a coastline across the chart
+    const x = (i * cw0) / 9, y = chh * (0.30 + ch() * 0.42);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  for (let i = 1; i < 5; i++) {
+    const y = (i * chh) / 5;
+    ctx.beginPath(); ctx.moveTo(6, y); ctx.lineTo(cw0 - 6, y); ctx.stroke();
+  }
+  ctx.restore();
+
+  // The cabin's one light, hung CLEAR of the centred panel - at W*0.50 the lamp itself
+  // was behind the settings window and only its pool ever reached the viewer.
+  const lx = Math.round(W * 0.20), ly = Math.round(H * 0.055);
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(lx, 0); ctx.lineTo(lx, ly); ctx.stroke();
+  ctx.fillStyle = 'rgba(148,132,84,0.24)';
+  ctx.beginPath();
+  ctx.moveTo(lx - 20, ly + 18); ctx.lineTo(lx + 20, ly + 18); ctx.lineTo(lx + 9, ly); ctx.lineTo(lx - 9, ly);
+  ctx.closePath(); ctx.fill();
+  const pool = ctx.createRadialGradient(lx, ly + 20, 12, lx, ly + 20, Math.max(W, H) * 0.70);
+  pool.addColorStop(0, 'rgba(238,214,124,0.15)');
+  pool.addColorStop(0.42, 'rgba(238,214,124,0.045)');
+  pool.addColorStop(1, 'rgba(238,214,124,0)');
+  ctx.fillStyle = pool;
+  ctx.fillRect(0, 0, W, H);
+
+  kTex.needsUpdate = true;
+}
+// ZERO-SIZED wrapper: a sized full-screen node overlaps every sibling in the census.
+cabin.onLayout = function () {
+  kQuad.setRect(0, 0, Math.round(engine.width), Math.round(engine.height));
+  paintCabin();
+};
+
+// the panel is CENTRED, the way a game opens its settings over whatever it was showing
+// sized to its CONTENT (four form rows and a tab strip), not to the frame - a panel
+// stretched to the window's height is just a taller empty pane
+const PANEL_W = 620, PANEL_H = 462;
+// The resize FLOOR is ONE constant shared by the window that declares it and the
+// suite that drives the window to it (the rich-text SAMPLER_MIN idiom): a literal
+// in the input replay silently stops proving the floor the moment the declaration moves.
+const PANEL_MIN_W = 480, PANEL_MIN_H = 432;
+
+// ---- the settings model: one draft object, applied or reverted as a whole ----
+const STORE_KEY = 'eldritch-settings-demo';
+const DEFAULTS = {
+  master: 70, chants: 50, drone: true, whispers: false,
+  quality: 'Balanced', movement: 'wasd',
+  bindAttack: 'Mouse1', bindWard: 'Q', bindLantern: 'F',
+};
+const saved = (() => {
+  try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem(STORE_KEY) ?? '{}') }; }
+  catch { return { ...DEFAULTS }; }
+})();
+let applied = { ...saved };  // what the game runs with (persisted)
+let draft = { ...saved };    // what the controls edit
+
+const controls = {}; // id -> widget, for revert repainting
+let applyBtn, revertBtn; // built inside the window content below; these close over them
+let winTabs = null;
+
+// The dirty state is INFORMATION, not a lock: the footer buttons stay live (a
+// resting-disabled primary reads as broken to a first-time viewer — the
+// ruling), and the status text carries what they would do.
+let dirty = false;
+const statusText = new TextNode('No changes', { size: 12, color: COLORS.textFaint });
+function markDirty() { dirty = true; statusText.setText('Unsaved changes'); statusText.setColor(COLORS.quest); }
+function markClean() { dirty = false; statusText.setText('No changes'); statusText.setColor(COLORS.textFaint); }
+
+// keybind conflict rule: no two actions may share a combo
+const BINDS = ['bindAttack', 'bindWard', 'bindLantern'];
+const BIND_LABELS = { bindAttack: 'Attack', bindWard: 'Raise Ward', bindLantern: 'Lantern' };
+const conflictWith = (self) => (combo) => {
+  for (const id of BINDS) { if (id !== self && draft[id] === combo) return BIND_LABELS[id]; }
+  return null;
+};
+
+// Apply / Revert ride the footer lane (right-justified past a flex Spacer; the
+// status text holds the left). Both stay ENABLED at rest: a clean Apply/Revert
+// answers with a quiet toast instead of silently absorbing the click.
+applyBtn = new Button('Apply', {
+  onClick: () => {
+    if (!dirty) {
+      EldToast.show({ title: 'Nothing to change', message: 'The configuration already holds.', duration: 2 });
+      return;
+    }
+    applied = { ...draft };
+    localStorage.setItem(STORE_KEY, JSON.stringify(applied));
+    markClean();
+    EldToast.show({ title: 'Applied', message: 'The configuration holds.', duration: 2.5 });
+  },
+});
+revertBtn = new Button('Revert', {
+  onClick: () => {
+    if (!dirty) {
+      EldToast.show({ title: 'Nothing to revert', message: 'No unapplied changes.', duration: 2 });
+      return;
+    }
+    EldPopup.show({
+      title: 'Revert Changes',
+      message: 'Abandon the unapplied changes and restore the last applied state?',
+      onOkay: () => {
+        draft = { ...applied };
+        // repaint every control silently from the restored draft
+        controls.master?.setValue(draft.master);
+        controls.chants?.setValue(draft.chants);
+        controls.drone?.setChecked(draft.drone);
+        controls.whispers?.setChecked(draft.whispers);
+        controls.quality?.setValue(draft.quality);
+        for (const id of BINDS) controls[id]?.setValue(draft[id]);
+        Radio.selectValue('set-move', draft.movement);
+        markClean();
+        EldEvents.log('Settings reverted.', 'UI');
+      },
+    });
+  },
+});
+
+const win = EldWindow.create({
+  title: 'Settings',
+  // minHeight keeps the tabs pane fully visible above the footer at the resize floor
+  width: PANEL_W, height: PANEL_H,
+  x: Math.round((engine.width - PANEL_W) / 2),
+  y: Math.max(24, Math.round((engine.height - 46 - PANEL_H) / 2)),
+  minWidth: PANEL_MIN_W, minHeight: PANEL_MIN_H,
+  footer: [statusText, new Spacer(), applyBtn, revertBtn],
+  content: (c, winRef) => {
+    const tabs = winTabs = new Tabs({
+      width: 500, height: 330, // first-paint size; the wrap below tracks the content box
+      tabs: [
+        { id: 'audio', label: 'Audio', icon: 'cogwheel', build: (p) => {
+          // form rows: one label column, one height lane — the hand-rolled
+          // `setPos(150, y - 6)` arithmetic this page used to carry is gone.
+          const form = new Form({ labelWidth: 140 });
+          form.row('Master', controls.master = new Slider({ value: draft.master, width: 220, onChange: (v) => { draft.master = v; markDirty(); } }));
+          form.row('Chants', controls.chants = new Slider({ value: draft.chants, width: 220, onChange: (v) => { draft.chants = v; markDirty(); } }));
+          form.row('', controls.drone = new ToggleLabel('Ambient abyssal drone', { checked: draft.drone, onChange: (v) => { draft.drone = v; markDirty(); } }));
+          form.row('', controls.whispers = new ToggleLabel('Voices of the choir', { checked: draft.whispers, onChange: (v) => { draft.whispers = v; markDirty(); } }));
+          form.setPos(4, 8); p.add(form);
+        } },
+        { id: 'controls', label: 'Controls', icon: 'rows', build: (p) => {
+          const form = new Form({ labelWidth: 140 });
+          for (const id of BINDS) {
+            form.row(BIND_LABELS[id], controls[id] = new KeybindField({
+              value: draft[id], width: 190,
+              checkConflict: conflictWith(id),
+              onChange: (v) => { draft[id] = v; markDirty(); },
+              onConflict: (combo, withWhat) => EldToast.show({
+                title: 'Binding in use', message: `${combo} already invokes ${withWhat}.`, variant: 'info', duration: 3,
+              }),
+            }));
+          }
+          const radios = new HBox({ gap: 16, align: 'center' });
+          radios.add(
+            new RadioLabel('set-move', 'WASD', { checked: draft.movement === 'wasd', value: 'wasd', onChange: (v) => { if (v) { draft.movement = 'wasd'; markDirty(); } } }),
+            new RadioLabel('set-move', 'Arrow Keys', { checked: draft.movement === 'arrows', value: 'arrows', onChange: (v) => { if (v) { draft.movement = 'arrows'; markDirty(); } } }),
+          );
+          form.row('Movement', radios);
+          form.setPos(4, 8); p.add(form);
+        } },
+        { id: 'display', label: 'Display', icon: 'tune', build: (p) => {
+          const form = new Form({ labelWidth: 140 });
+          form.row('Fidelity', controls.quality = new Select({
+            options: ['Candlelight', 'Balanced', 'Full Madness'], value: draft.quality, width: 200,
+            onChange: (v) => { draft.quality = v; markDirty(); },
+          }));
+          form.setPos(4, 8); p.add(form);
+        } },
+      ],
+    });
+    tabs.setPos(4, 4);
+    c.add(tabs);
+    // The tabs track the window's content box (the laneColumn wrap idiom): a
+    // hard-sized child inside a scrollX window is an H-rail waiting for a narrow
+    // resize — responsive width makes horizontal overflow impossible above the
+    // window's own floor.
+    const tabsLayout = tabs.onLayout.bind(tabs);
+    tabs.onLayout = () => {
+      const area = winRef.contentArea;
+      const bw = Math.max(120, area.boxW - 8), bh = Math.max(120, area.boxH - 8);
+      if (tabs.w !== bw || tabs.h !== bh) tabs.setSize(bw, bh);
+      tabsLayout();
+    };
+  },
+});
+
+window.__settings = { controls, getDraft: () => draft, getApplied: () => applied, conflictWith,
+  applyBtn, revertBtn, ground: () => ground };
+
+// ---- the ground circle: right-click on the cabin opens the wheel —
+// Apply/Revert ride the SAME buttons (dirty-gated toasts included), and the
+// Tabs ring walks the pane through its own loud selectTab.
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'apply', label: 'Apply' },
+ { id: 'revert', label: 'Revert' },
+ { id: 'tabs', label: 'Tabs', children: [
+ { id: 'audio', label: 'Audio' },
+ { id: 'controls', label: 'Controls' },
+ { id: 'display', label: 'Display' },
+ ] },
+ ],
+});
+ground.on('select', ({ id, path }) => {
+  if (id === 'apply') applyBtn.dispatch('click', {});
+  else if (id === 'revert') revertBtn.dispatch('click', {});
+  else if (path[0] === 'tabs') winTabs?.selectTab(id, { silent: false });
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+
+// ---- ?assert=1: the in-page suite (the apply/revert law, gated) ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    await wait(600); // the tabs pane and footer lane settle
+
+    const audit = runAudit(engine);
+    const v0 = audit.violations[0];
+    const cts = audit.counts;
+    // every rule, not a hand-list: a five-name sum silently exempts whatever rule
+    // lands next (reach, the sixth, was invisible to it)
+    ok(`the page audits clean on every rule${v0 ? ` [${v0.rule} ${v0.path} ${v0.detail ?? ''}]` : ''}`,
+      Object.values(cts).reduce((a, b) => a + b, 0) === 0);
+
+    // the footer rests LIVE and the status carries the state
+    ok('the footer rests enabled with the status reading clean',
+      applyBtn.disabled === false && revertBtn.disabled === false
+      && statusText._text === 'No changes');
+
+    // hit-reach: the REAL hit path returns each footer button at its center
+    // (dispatch bypasses hit testing — this is the occlusion proof)
+    const hitOf = (n) => hitTest(engine, n.worldX + n.w / 2, n.worldY + n.h / 2);
+    const hitA = hitOf(applyBtn), hitR = hitOf(revertBtn);
+    ok('hit-reach: Apply and Revert answer the real hit probe',
+      (hitA === applyBtn || applyBtn.isAncestorOf?.(hitA)) &&
+      (hitR === revertBtn || revertBtn.isAncestorOf?.(hitR)));
+
+    // a clean Apply no-ops with a voice: nothing persisted, a toast answers
+    const toasts0 = EldToast.live.length;
+    const stored0 = localStorage.getItem(STORE_KEY);
+    applyBtn.dispatch('click', {});
+    await wait(120);
+    ok('a clean Apply answers with a toast and persists nothing',
+      EldToast.live.length === toasts0 + 1 && localStorage.getItem(STORE_KEY) === stored0);
+
+    // a clean Revert no-ops too — no popup interrogation for nothing. The toast
+    // count must GROW: popup-absence alone is satisfied by a handler that never ran.
+    const toasts1 = EldToast.live.length;
+    revertBtn.dispatch('click', {});
+    await wait(120);
+    ok('a clean Revert answers with a toast, no popup',
+      EldToast.live.length === toasts1 + 1 && EldPopup._current == null);
+
+    // a loud edit flips the status
+    controls.master.setValue(80, { silent: false });
+    await wait(80);
+    ok('an edit marks the draft dirty in the status lane',
+      draft.master === 80 && statusText._text === 'Unsaved changes');
+
+    // apply persists the draft and the status returns clean
+    applyBtn.dispatch('click', {});
+    await wait(120);
+    const stored = JSON.parse(localStorage.getItem(STORE_KEY) ?? '{}');
+    ok('apply persists and the status returns clean',
+      applied.master === 80 && stored.master === 80 && statusText._text === 'No changes');
+
+    // revert asks first (the popup-gate proof), then repaints from the applied state
+    controls.master.setValue(90, { silent: false });
+    await wait(80);
+    revertBtn.dispatch('click', {});
+    await wait(150);
+    const gated = draft.master === 90; // still dirty while the popup asks
+    EldPopup._finish('ok');
+    await wait(150);
+    ok('revert asks first and repaints from the applied state',
+      gated && draft.master === 80 && controls.master.value === 80 && statusText._text === 'No changes');
+
+    // the conflict rule names the holder and clears strangers
+    ok('the binding conflict rule names the holder',
+      conflictWith('bindWard')('Mouse1') === 'Attack' && conflictWith('bindWard')('X') === null);
+
+    // the tabs switch panes through their own select
+    const switched = winTabs.selectTab('controls', { silent: false });
+    await wait(120);
+    ok('the tabs switch panes', switched === true && winTabs.activeId === 'controls');
+
+    // the resize floor holds no horizontal overflow (the responsive-tabs proof:
+    // the mid-panel H-rail class dies at the source)
+    // CAPTURE the resting box, never a literal: a hard-coded restore silently stops
+    // restoring the moment the panel is laid out from the frame instead
+    const rw0 = win.w, rh0 = win.h;
+    win.setRect(win.x, win.y, PANEL_MIN_W, PANEL_MIN_H);
+    await wait(120);
+    ok('the resize floor holds no horizontal overflow',
+      win.contentArea.hBarVisible === false && winTabs.w <= win.contentArea.boxW);
+    win.setRect(win.x, win.y, rw0, rh0);
+    await wait(120);
+
+    // the ground circle: right-click on the cabin opens the wheel, and
+    // the nested Tabs>Controls pick walks the pane through its own loud selectTab
+    engine.bus.emit('pointerdown', { x: 200, y: 620, button: 2, pointerId: 65, target: null, native: null });
+    await wait(60);
+    ok('ground: a right-click on the cabin opens the wheel',
+      window.__settings.ground().isOpen === true);
+    window.__settings.ground()._setIndex(2, false); // Tabs
+    window.__settings.ground().onActivate();
+    await wait(40);
+    window.__settings.ground()._setIndex(1, false); // Controls
+    window.__settings.ground().onActivate();
+    await wait(80);
+    ok('ground: the nested Controls pick lands the tab through selectTab',
+      window.__settings.ground().isOpen === false && winTabs.activeId === 'controls');
+    winTabs.selectTab('audio', { silent: true }); // the boot tab back for the shot
+
+    // the boot-health hooks are part of the contract: a suite that went green while
+    // an error rode the title would be measuring the wrong thing
+    ok('the page runs error-free end to end', window.__errs.length === 0);
+
+    localStorage.removeItem(STORE_KEY); // never leak state into the next run
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `SETTINGS ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+} else {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'SETTINGS READY';
+  }, 1000);
+}
+</script>
+</body>
+</html>

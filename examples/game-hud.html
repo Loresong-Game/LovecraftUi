@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Game HUD</title>
+<!-- @demo   The 1.0 flagship: a complete combat HUD, fought in a drowned hall of cyclopean masonry with the tide standing on its floor.
+     @shows  UnitFrame, ActionBar, Globe, CastBar, Minimap, QuestTracker, ChatBox, ProgressBar, FloatText, EldToast, EldDragDrop, RadialMenu, UINode, QuadNode
+     @params ?freeze=1 — bit-stable snapshot boot (no ambiance, the world holds its breath) · ?assert=1 — the in-page suite titles its own PASS count · ?torture=1 / ?audit=1 / ?resize=1 — the world tick parks for every census -->
+
+<!-- The 1.0 flagship (the page builds its first gated suite): a complete combat
+     HUD driven by a fake game-state ticker. Unit frames drain and heal, the action
+     bar carries keybinds and cooldowns, damage floats off the target, casts loop and
+     get interrupted, quests advance, loot toasts, the chat box takes submits with
+     history recall (grip-resizable, corner 'tr'), and the XP bar levels up. The
+     world tick is RANDOM by design and boots cold under FROZEN/ASSERT (the ambient
+     ticker rule at its loudest) — the suite drives the page's own combat verbs with
+     fixed numbers instead. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {
+  Eldritch, EldDragDrop, EldToast, EldEvents,
+  UnitFrame, ActionBar, Globe, CastBar, Minimap, QuestTracker, ChatBox,
+  ProgressBar, FloatText, RadialMenu, UINode, TextNode, QuadNode,
+  runAudit, hitTest, COLORS, FONTS,
+} from '../src/lovecraft-ui.js';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+// INSTRUMENTED (the arcade/meters idiom): every census boot reads a RESTING hall.
+const INSTRUMENTED = FROZEN || ASSERT
+  || params.has('audit') || params.has('torture') || params.has('resize');
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  // vignette:false LIVE too (the STYLE §8 HUD exception):
+  // the engine vignette is the TOPMOST layer and dimmed the corner chrome — the
+  // minimap sat under its darkest band. paintHall bakes the falloff into the
+  // WORLD canvas instead, so the mood stays and the stone reads full-bright.
+  : { contextMenu: false, vignette: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+window.engine = engine;
+const layer = engine.layers.background;
+
+// ---- the drowned hall: ONE page-owned canvas, painted on resize ----
+// The 1.0 flagship fought in a black void. A combat HUD is judged against the world
+// it sits over, and this one had none: the whole centre of the frame was nothing.
+const hall = new UINode({ name: 'drowned-hall' });
+const bdCanvas = document.createElement('canvas');
+const bdTex = new THREE.CanvasTexture(bdCanvas);
+bdTex.colorSpace = THREE.SRGBColorSpace;
+bdTex.minFilter = THREE.LinearFilter;
+bdTex.magFilter = THREE.LinearFilter;
+bdTex.generateMipmaps = false;
+const bdQuad = new QuadNode({ texture: bdTex });
+hall.add(bdQuad);
+layer.add(hall);
+hall.on('dispose', () => bdTex.dispose());
+const srnd = (n) => { let s = n; return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff; };
+
+function paintHall() {
+  const W = Math.max(2, Math.round(engine.width)), H = Math.max(2, Math.round(engine.height));
+  if (bdCanvas.width !== W || bdCanvas.height !== H) { bdCanvas.width = W; bdCanvas.height = H; }
+  const ctx = bdCanvas.getContext('2d');
+  const cx = W / 2, floorY = Math.round(H * 0.72);
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#05090c';
+  ctx.fillRect(0, 0, W, H);
+
+  // the vault: courses of cyclopean masonry receding to a lit apse
+  const r = srnd(5150);
+  for (let ring = 7; ring >= 1; ring--) {
+    const t = ring / 7;
+    const rw = 120 + t * W * 0.86, rh = 90 + t * H * 0.66;
+    ctx.strokeStyle = `rgba(78,94,84,${0.08 + (1 - t) * 0.17})`;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(cx - rw / 2, floorY);
+    ctx.lineTo(cx - rw / 2, floorY - rh * 0.55);
+    ctx.quadraticCurveTo(cx, floorY - rh, cx + rw / 2, floorY - rh * 0.55);
+    ctx.lineTo(cx + rw / 2, floorY);
+    ctx.stroke();
+  }
+  // the apse light, far off and cold
+  const apse = ctx.createRadialGradient(cx, floorY - 120, 8, cx, floorY - 120, 260);
+  apse.addColorStop(0, 'rgba(111,209,139,0.10)');
+  apse.addColorStop(1, 'rgba(111,209,139,0)');
+  ctx.fillStyle = apse;
+  ctx.fillRect(cx - 260, floorY - 380, 520, 520);
+
+  // colonnade: pillars marching out of the dark toward the viewer
+  for (const [px, pw, ph, a] of [
+    [cx - W * 0.34, 44, 300, 0.55], [cx + W * 0.34, 44, 300, 0.55],
+    [cx - W * 0.21, 30, 230, 0.4], [cx + W * 0.21, 30, 230, 0.4],
+  ]) {
+    ctx.fillStyle = `rgba(23,29,27,${0.6 + a * 0.4})`;
+    ctx.fillRect(px - pw / 2, floorY - ph, pw, ph);
+    ctx.strokeStyle = `rgba(96,110,100,${0.10 + a * 0.22})`;   // the lit edge
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(px - pw / 2 + 1, floorY - ph); ctx.lineTo(px - pw / 2 + 1, floorY);
+    ctx.stroke();
+    ctx.fillStyle = `rgba(0,0,0,${0.35 + a * 0.3})`;            // the shaded side
+    ctx.fillRect(px + pw / 2 - 9, floorY - ph, 9, ph);
+    for (const cy of [floorY - ph, floorY - 12]) {              // capital and base
+      ctx.fillStyle = `rgba(30,38,34,${0.7 + a * 0.3})`;
+      ctx.fillRect(px - pw * 0.72, cy, pw * 1.44, 13);
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.fillRect(px - pw * 0.72, cy + 11, pw * 1.44, 3);
+    }
+  }
+
+  // the flooded floor: standing water holding the apse light
+  const water = ctx.createLinearGradient(0, floorY, 0, H);
+  water.addColorStop(0, '#081416');
+  water.addColorStop(1, '#050b0d');
+  ctx.fillStyle = water;
+  ctx.fillRect(0, floorY, W, H - floorY);
+  ctx.fillStyle = 'rgba(111,209,139,0.05)';
+  ctx.fillRect(cx - 40, floorY, 80, Math.round((H - floorY) * 0.7));
+  ctx.strokeStyle = 'rgba(120,180,155,0.055)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 16; i++) {
+    const y = floorY + 4 + r() * (H - floorY - 8);
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    for (let x = 0; x <= W; x += 44) ctx.lineTo(x, y + Math.sin((x + i * 60) * 0.013) * 2);
+    ctx.stroke();
+  }
+  // spores drifting in the apse light (static: the shot must settle)
+  for (let i = 0; i < 60; i++) {
+    const x = cx + (r() - 0.5) * W * 0.8, y = floorY - r() * H * 0.5;
+    ctx.fillStyle = `rgba(150,220,180,${0.03 + r() * 0.07})`;
+    ctx.beginPath(); ctx.arc(x, y, 0.8 + r() * 1.6, 0, Math.PI * 2); ctx.fill();
+  }
+  // the vignette lives IN the world (the minimap and the
+ // corner controls read dimmer than the demo's). The engine's vignette layer
+  // paints over EVERYTHING including HUD chrome, and this page parks its whole
+  // interface in the corners — so the page passes vignette:false at init and the
+  // hall carries its own falloff instead: the WORLD keeps the mood, the stone
+  // stays full-bright like the demo's mid-page widgets.
+  const worldVg = ctx.createRadialGradient(cx, H * 0.52, Math.min(W, H) * 0.3, cx, H * 0.52, Math.max(W, H) * 0.72);
+  worldVg.addColorStop(0, 'rgba(1,3,2,0)');
+  worldVg.addColorStop(0.7, 'rgba(1,3,2,0.2)');
+  worldVg.addColorStop(1, 'rgba(1,3,2,0.5)');
+  ctx.fillStyle = worldVg;
+  ctx.fillRect(0, 0, W, H);
+  bdTex.needsUpdate = true;
+}
+// zero-sized wrapper: a full-screen node beside the HUD siblings overlaps every one
+hall.onLayout = function () {
+  bdQuad.setRect(0, 0, engine.width, engine.height);
+  paintHall();
+};
+
+// ---- the fake game state ----
+const state = {
+  player: { hp: 255, hpMax: 255, mp: 100, mpMax: 100, sanity: 74 },
+  target: { hp: 4200, hpMax: 4200, alive: true },
+  xp: 1240, xpMax: 2000, level: 55,
+  broodSlain: 0,
+};
+
+// ---- frames, globes, cast bar ----
+const player = new UnitFrame({ name: 'Randolph Carter', portrait: 'portrait.player', level: state.level, health: [state.player.hp, state.player.hpMax], mana: [state.player.mp, state.player.mpMax] });
+player.addEffect({ icon: 'shield', name: 'Elder Ward', desc: 'Absorbs 500 damage', buff: true });
+// the name fits the plate: "Star-Spawn of Cthulhu" ellipsized to "Star-Spawn of C..."
+// inside a frame that had no room for it, which is a truncation you can SEE
+const target = new UnitFrame({ name: 'Star-Spawn', portrait: 'portrait.target', level: 62, health: [state.target.hp, state.target.hpMax], mana: [500, 500] });
+target.addEffect({ icon: 'fireball', name: 'Balefire Burn', desc: 'Burning.', buff: false });
+
+const vitality = new Globe({ kind: 'health', label: 'Vitality', value: 100, max: 100, radius: 44 });
+const sanity = new Globe({ kind: 'sanity', label: 'Sanity', value: state.player.sanity, max: 100, radius: 44 });
+const cast = new CastBar({ width: 300 });
+cast.visible = false; // shown on the first summoning — an idle cast frame is an empty box
+// The groove wears a page-owned wash. The bar paints its bright name straight over
+// the lit fill, and the first MID-CAST audit ever run on this page read 3.39:1 —
+// under the 4.5 floor. No text color survives a surface that runs dark-groove to
+// lit-fill, so the surface gives way: the wash deepens the whole groove lane and
+// the two texts re-seat above it (add() moves an existing child to the top). The
+// resting censuses never see it — the bar boots hidden — but every live summoning
+// reads it.
+const castWash = new QuadNode({ color: '#04060a', opacity: 0.45 });
+cast.add(castWash, cast.nameText, cast.timeText);
+const castLayoutOwn = cast.onLayout.bind(cast);
+cast.onLayout = function () {
+  castLayoutOwn();
+  castWash.setRect(48, 8, this.w - 54, 20); // the groove lane the fill occupies
+};
+
+// ---- action bar with keybinds ----
+const bar = new ActionBar({ rows: 1, cols: 6, lock: true });
+const RITES = ['fireball', 'shield', 'sword', 'arrows', 'blindinglight', 'leafs'];
+RITES.forEach((r, i) => {
+  EldDragDrop.createIconInSlot(bar.slots[i], r);
+  bar.slots[i].setKeybind(String(i + 1));
+});
+// radial-chain demonstration: the hotbar is a provider — a right-click on
+// a slot offers its rite's verbs through the shared wheel; everything else on
+// the HUD falls through to the page's ground wheel.
+bar.radialItems = (e) => {
+  const slot = e.target?.closest?.((n) => n.slotKind === 'action');
+  if (!slot || !EldDragDrop.getSlotIcon(slot)) return null;
+  return [
+    { id: 'invoke', label: 'Invoke', onSelect: () => EldDragDrop.triggerAction(slot) },
+    {
+      id: 'clear', label: 'Clear',
+      disabled: EldDragDrop.locked === true,
+      reason: EldDragDrop.locked === true ? 'The bar is pinned.' : undefined,
+      onSelect: () => EldDragDrop.clearSlot(slot),
+    },
+  ];
+};
+// The labels are honest: digits 1-6 fire their rites. triggerAction is the same public
+// path focus activation (Enter / gamepad-A) takes — empty slots no-op, the cooldown
+// starts, and the locked bar still triggers (the lock only pins icons in place).
+// Typing in chat keeps its digits: the library's hidden text input holds DOM focus then.
+// Eldritch.onKey, never window.addEventListener. This page HAD hand-rolled the guard
+// (an activeElement tagName check) and got it right — which is exactly the problem: the
+// guarantee lived in one page's memory instead of the engine, so the three pages that
+// forgot it shipped hotkeys that fired while you were typing.
+Eldritch.onKey(['1', '2', '3', '4', '5', '6'], {
+  down: (e) => {
+    if (e.native?.ctrlKey || e.native?.metaKey || e.native?.altKey) return;
+    const n = Number(e.key);
+    if (bar.slots[n - 1]) EldDragDrop.triggerAction(bar.slots[n - 1]);
+  },
+});
+
+// ---- minimap + quests ----
+const map = new Minimap({ zone: "R'lyeh Depths", zoneLevel: 'Contested' });
+map.addMarker('enemy', 62, 38);
+map.addMarker('quest-exclaim', 30, 64);
+const quests = new QuestTracker({
+  header: 'Obligations', width: 250,
+  quests: [{ title: "Dagon's Bane", objectives: [{ progress: '0/5', text: 'Slay the deep brood', done: false }] }],
+});
+const broodQuest = quests.questNodes[0].id;
+
+// ---- chat: the ChatBox widget (EventLog + TextField + history recall, one node) ----
+// 170 -> 230 @(the default text boxes ran too small to use;
+// with the wrap law live the taller box shows ~9 lines instead of ~6)
+const chat = new ChatBox({ width: 300, height: 230, placeholder: 'Speak into the dark…',
+  resizable: { corner: 'tr' }, // bottom-left-anchored chat grows up-right
+  // send hands the keyboard BACK (the second half of the Enter loop below): after a
+  // line goes out you are playing again, hotkeys live, and the next Enter re-opens
+  onSubmit: () => engine.setFocus(null) });
+// Enter opens the chat (the MMO convention): a free Enter
+// hands the keyboard to the say bar so typing starts instantly. onKey fires only
+// while nothing holds focus, so a focused control's Enter still activates it.
+Eldritch.onKey('Enter', { down: () => chat.focusInput() });
+// the input replay's handle bag (tools/drives/game-hud.json): EldDragDrop rides
+// along so the input replay can count 'action-triggered' commits without racing the live sim
+window.__game = { chat, bar, state, EldDragDrop };
+
+// ---- the ground circle: right-click on the open world opens the wheel;
+// chrome (slots, chat, frames) keeps its own presses (the ruling). The
+// Rites ring fires the SAME triggerAction path the digit hotkeys ride —
+// cooldowns included, empty slots no-op politely.
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'speak', label: 'Speak' },
+ { id: 'rites', label: 'Rites', children: [
+ { id: 'first', label: 'First' },
+ { id: 'second', label: 'Second' },
+ { id: 'third', label: 'Third' },
+ ] },
+ ],
+});
+const RITE_SLOT = { first: 0, second: 1, third: 2 };
+ground.on('select', ({ id, path }) => {
+  if (id === 'speak') chat.focusInput();
+  else if (path[0] === 'rites') EldDragDrop.triggerAction(bar.slots[RITE_SLOT[id]]);
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+window.__game.ground = ground;
+
+// ---- XP bar (segmented — ten pips to the next level) + level text ----
+const xpBar = new ProgressBar({ value: (state.xp / state.xpMax) * 100, width: 520, segments: 10 });
+const xpText = new TextNode('', { font: FONTS.mono, size: 11, color: COLORS.bone, shadow: { color: 'rgba(0,0,0,0.9)', dx: 1, dy: 1, blur: 2 } });
+function paintXp() {
+  xpBar.setValue((state.xp / state.xpMax) * 100);
+  xpText.setText(`Level ${state.level} — ${state.xp} / ${state.xpMax} xp`);
+  hud.invalidateLayout();
+}
+
+// ---- floaters over each frame ----
+const floats = new FloatText({ pool: 24 });
+
+// The glue lays FIRST (added to the layer before the widgets it seats): the
+// layout pass is one top-down sweep, so a derived write made here — the chat's
+// lane width — must land BEFORE the chat's own subtree lays, or the children
+// trail the outer box by one settle beat. The snapshot capture races the first
+// composite by design (the test suite's own header), and it caught exactly that
+// half-settled beat: chat chrome one width, chat children another.
+const hud = new UINode({ name: 'hud-root' });
+layer.add(hud);
+layer.add(player, target, vitality, sanity, cast, bar, map, quests, chat, xpBar, xpText, floats);
+
+// ---- HUD layout (glued to the engine size, above the taskbar strip). The chat's
+// width lane-glues to the vitality globe's left edge until the user takes the grip
+// (the rule: at 1024×640 a fixed 300-wide chat collides with the globe — the
+// resizable widget is the one that gives way). ----
+// the grip sets chat.userPlaced itself now (was a page-side chatTaken)
+hud.onLayout = function () {
+  const W = engine.width, H = engine.height;
+  // The xp sliver rides ABOVE the taskbar strip. It used to sit at H - 66 with a
+  // segmented bar ~14 tall, so the strip ate its bottom edge in every screenshot -
+  // clear the strip by its own height plus the bar, not by a guessed constant.
+  const xpY = H - 50 - xpBar.h - 14;
+  const bottom = xpY - 24;          // everything else stacks above the xp row
+  player.setPos(16, 12);
+  target.setPos(16 + player.w + 24, 12);
+  map.setPos(W - map.w - 16, 12);
+  quests.setPos(W - quests.w - 16, 12 + 250);
+  bar.setPos(Math.round((W - bar.w) / 2), bottom - bar.h);
+  cast.setPos(Math.round((W - cast.w) / 2), bottom - bar.h - 48);
+  const vitX = Math.round(W / 2 - bar.w / 2 - vitality.w - 30);
+  vitality.setPos(vitX, bottom - vitality.h + 4);
+  sanity.setPos(Math.round(W / 2 + bar.w / 2 + 30), bottom - sanity.h + 4);
+  if (!chat.userPlaced) {
+    const cw = Math.max(200, Math.min(300, vitX - 16 - 8));
+    if (chat.w !== cw) chat.setSize(cw, chat.h);
+  }
+  // THE FREEDOM LAW: no element budgets the grip — the
+  // player may grow the chat over the globes and frames if they want it there.
+  // The grip's only ceiling is built into ResizeGrip: the drag handle stays
+  // within the visible screen. (The lane GLUE above is boot auto-layout only —
+  // it stands down forever at the grip's first claim.)
+  chat.setPos(16, bottom - chat.h);
+  xpBar.setPos(Math.round((W - xpBar.w) / 2), xpY);
+  xpText.setPos(Math.round((W - xpText.w) / 2), xpY - 15);
+  floats.setRect(0, 0, W, H);
+};
+
+// ---- combat verbs ----
+function hitTarget(amount, crit) {
+  if (!state.target.alive) return;
+  state.target.hp = Math.max(0, state.target.hp - amount);
+  target.setHealth(state.target.hp, state.target.hpMax);
+  floats.spawn(crit ? `${amount}!` : amount, target.worldX + 190, target.worldY + 60, { crit, color: COLORS.negative });
+  if (state.target.hp <= 0) slay();
+}
+
+function slay() {
+  state.target.alive = false;
+  const wasDone = state.broodSlain >= 5;
+  state.broodSlain = Math.min(5, state.broodSlain + 1);
+  quests.updateObjective(broodQuest, 0, { progress: `${state.broodSlain}/5`, done: state.broodSlain >= 5 });
+  if (!wasDone && state.broodSlain >= 5) quests.completeQuest(broodQuest); // completes once, not per kill
+  EldToast.show({ title: 'Slain', message: 'The Star-Spawn returns to its slumber.', variant: 'achievement', duration: 3 });
+  EldToast.show({ title: 'Loot', message: 'Void Shard ×1', variant: 'loot', icon: 'deathkiss', duration: 3.5 });
+  gainXp(420);
+  setTimeout(() => {
+    state.target.alive = true;
+    state.target.hp = state.target.hpMax;
+    target.setHealth(state.target.hp, state.target.hpMax);
+    EldEvents.log('Another shape coalesces in the dark…', 'COMBAT');
+  }, 2600);
+}
+
+function gainXp(n) {
+  state.xp += n;
+  while (state.xp >= state.xpMax) { // an award can span more than one level
+    state.xp -= state.xpMax;
+    state.level += 1;
+    player.setLevel(state.level);
+    EldToast.show({ title: 'Level ' + state.level, message: 'The depths take note of you.', variant: 'achievement', duration: 4 });
+  }
+  paintXp();
+}
+
+// action bar rites strike the target (with the built-in 3s cooldown)
+EldDragDrop.on('action-triggered', () => {
+  const crit = Math.random() < 0.22;
+  hitTarget(crit ? 380 + Math.floor(Math.random() * 220) : 120 + Math.floor(Math.random() * 140), crit);
+});
+
+// the ONE reveal path: the bar boots hidden — an idle cast frame is an empty box —
+// and every summoning shows it through here. The re-append is the raise: later
+// siblings (the full-rect floats above all) would otherwise bury the bar the
+// moment it appeared. The world ticker AND the suite both walk this function,
+// so the reveal itself is what the suite proves.
+function summonCast(name, icon, dur) {
+  cast.parent?.add(cast); // reveal-with-raise: re-append so later siblings never bury it
+  cast.visible = true;
+  cast.startCast(name, icon, dur);
+}
+
+// ---- the fake game ticker: the world acts on its own. It rolls dice by DESIGN,
+// so it boots cold under FROZEN/ASSERT (the ambient-ticker rule at its loudest —
+// random damage, random crits, random interrupts hold neither a bit-stable
+// baseline nor settled assert reads); the suite drives the combat verbs with
+// fixed numbers instead. ----
+let acc = 0, castAcc = 4;
+const worldTick = (dt) => {
+  acc += dt;
+  castAcc += dt;
+  if (acc >= 1.4) {
+    acc = 0;
+    // the enemy claws the player; wards and moss answer
+    const dmg = 6 + Math.floor(Math.random() * 14);
+    state.player.hp = Math.max(40, state.player.hp - dmg);
+    player.setHealth(state.player.hp, state.player.hpMax);
+    floats.spawn(dmg, player.worldX + 190, player.worldY + 60, { color: COLORS.negative });
+    if (state.player.hp < 140) {
+      state.player.hp = Math.min(state.player.hpMax, state.player.hp + 60);
+      player.setHealth(state.player.hp, state.player.hpMax);
+      floats.spawn('+60', player.worldX + 150, player.worldY + 60, { color: COLORS.positive });
+    }
+    vitality.setValue((state.player.hp / state.player.hpMax) * 100);
+    state.player.sanity = Math.max(22, state.player.sanity - 1 + Math.floor(Math.random() * 3));
+    sanity.setValue(state.player.sanity);
+  }
+  if (castAcc >= 6) {
+    castAcc = 0;
+    summonCast('Summoning Shoggoth', 'fireball2', 3.5);
+    // half the summonings are cut short by the fighting
+    if (Math.random() < 0.5) setTimeout(() => cast.interrupt(), 1400 + Math.random() * 1200);
+  }
+};
+engine.ticker.add((dt) => { if (!INSTRUMENTED) worldTick(dt); });
+cast.on('castinterrupt', () => EldEvents.log('The summoning is interrupted!', 'COMBAT'));
+cast.on('castcomplete', () => hitTarget(600, true));
+
+paintXp();
+// live lines carry wall-clock stamps; FROZEN seeds a fixed one (the baseline rule)
+if (FROZEN) chat.scrollback.append('[--:--:--]', 'SYSTEM', 'First night in R\'lyeh.');
+else EldEvents.log('First night in R\'lyeh.', 'SYSTEM');
+// the globes slosh on engine time through their OWN frame hooks — under FROZEN the
+// liquid holds still at t=0 (a bit-stable baseline cannot ride a shader clock)
+if (FROZEN) {
+  for (const g of [vitality, sanity]) { g.setFrameHook(null); g.orb.tick(0); }
+}
+
+// ---- the icon pack: the RE-SKIN idiom ----
+// `as:` points at the rite ids this page ALREADY uses, so the registry re-bakes
+// those exact names in place: the hotbar quads follow on their own (no slot
+// re-creation, no keybind re-set), the atlas budget never moves, and the
+// Lovecraftian tooltip lore stays attached to the same ids. `fallback: 'none'`
+// means a deleted assets/ folder simply leaves the procedural rites standing.
+//
+// This runs on the live, ?assert=1, ?audit=1 and ?torture=1 boots — everything
+// EXCEPT the frozen snapshot. That exclusion is mechanical, not a preference:
+// `--screenshot` captures at the load event and cannot be made to wait for an
+// async decode (--virtual-time-budget blacks out WebGL, measured), so a frozen
+// boot that awaited the pack would photograph an empty frame. The snapshot
+// therefore pins the procedural baseline and the assert suite below proves the
+// painted art actually lands.
+const PACK_RITES = [
+  { id: 'ico-0017', as: 'fireball' },      // Ember Bloom over Balefire
+  { id: 'ico-0210', as: 'shield' },        // Iron Bulwark over the Elder Ward
+  { id: 'ico-0513', as: 'sword' },         // Ironbound Longsword over the Ritual Blade
+  { id: 'ico-0707', as: 'arrows' },        // Bonecast Shortbow
+  { id: 'ico-0489', as: 'blindinglight' }, // Aetheric Eye
+  { id: 'ico-1921', as: 'leafs' },
+      { id: 'ico-0394', as: 'deathkiss' },         // Vital Vial
+];
+const packReady = FROZEN
+  ? Promise.resolve({ registered: [], missing: ['(frozen: procedural baseline)'] })
+  : Eldritch.loadIcons({ base: '../assets/icons', fallback: 'none', icons: PACK_RITES });
+
+// ---- ?assert=1: the flagship's first suite (the combat verbs with fixed
+// numbers; the random world tick stays cold) ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    // the pack lands before anything else is read: the assert suite is the
+    // instrument that CAN await it, so this is where the painted art is proved
+    const packRes = await packReady;
+    await wait(600); // the HUD glues and the first rasters land
+
+    // the re-skin: the painted rites replace the procedural art UNDER THE SAME
+    // ids, so the live hotbar quads show them with no page code at all
+    ok(`the icon pack re-skins the hotbar in place [${packRes.registered.join(',') || 'none'}${packRes.missing.length ? ' missing:' + packRes.missing.join(',') : ''}]`,
+      packRes.missing.length === 0
+      && packRes.registered.length === PACK_RITES.length
+      && bar.slots[0].icon.iconName === 'fireball'
+      && bar.slots[0].icon.quad.material.map === engine.textures.get('icon.fireball'));
+
+    // a fixed strike drains the target frame and floats the number
+    const hp0 = state.target.hp;
+    hitTarget(500, false);
+    await wait(80);
+    ok('a strike drains the target and floats the number',
+      state.target.hp === hp0 - 500 && floats.children.some((f) => f.visible !== false));
+
+    // the public trigger path fires a rite (the same path keys 1-6 take)
+    let fired = 0;
+    EldDragDrop.on('action-triggered', () => fired++);
+    const hp1 = state.target.hp;
+    EldDragDrop.triggerAction(bar.slots[0]);
+    await wait(80);
+    ok('a rite triggers through the public action path', fired === 1 && state.target.hp < hp1);
+
+    // the ground circle: a right-click on the open world opens the wheel,
+    // and the nested Rites>Second pick fires the SAME action path (slot 1 —
+    // slot 0 sits on the 3s cooldown the trigger above started)
+    engine.bus.emit('pointerdown', { x: 640, y: 300, button: 2, pointerId: 94, target: null, native: null });
+    await wait(60);
+    ok('ground: a right-click on the open world opens the wheel', window.__game.ground.isOpen === true);
+    window.__game.ground._setIndex(1, false); // Rites
+    window.__game.ground.onActivate();
+    await wait(40);
+    window.__game.ground._setIndex(1, false); // Second
+    window.__game.ground.onActivate();
+    await wait(80);
+    ok('ground: the nested rite pick fires through the public action path',
+      window.__game.ground.isOpen === false && fired === 2);
+    // the radial CHAIN: a hotbar slot offers its rite's verbs on the
+    // shared wheel through the dispatcher's own door
+    const openedG = engine.radialFallback(bar.slots[0], 400, 300, null);
+    ok('chain: a hotbar slot offers Invoke/Clear on the shared wheel',
+      openedG === true && engine.radialShared?.isOpen === true
+      && engine.radialShared.items[0]?.id === 'invoke');
+    engine.radialShared.close({ silent: true });
+    await wait(40);
+
+    // the cast completes on its own clock and strikes for exactly 600 — driven
+    // through the page's OWN reveal path, so the reveal is what gets proven: the
+    // bar is actually shown, and the re-append lifted it over the floats that
+    // paint after it in the boot order (nothing on screen is not a cast bar)
+    const hp2 = state.target.hp;
+    let completed = 0;
+    cast.on('castcomplete', () => completed++);
+    summonCast('Test Rite', 'fireball2', 0.4);
+    const kids = cast.parent.children;
+    ok('the reveal shows the cast bar and raises it above the floats',
+      cast.visible === true && kids.indexOf(cast) > kids.indexOf(floats));
+    await wait(900);
+    ok('a completed cast strikes for its full weight', completed === 1 && state.target.hp === hp2 - 600);
+
+    // an interrupt narrates into the chat scrollback (the same reveal path)
+    const lines0 = chat.scrollback.entries.length;
+    let cut = 0;
+    cast.on('castinterrupt', () => cut++);
+    summonCast('Doomed Rite', 'fireball2', 3);
+    await wait(120);
+    cast.interrupt();
+    await wait(120);
+    ok('an interrupt narrates into the chat', cut === 1 && chat.scrollback.entries.length === lines0 + 1);
+
+    // the floats decay, then the page proves its own zero
+    await wait(1400);
+    const audit = runAudit(engine);
+    const cts = audit.counts;
+    const v0 = audit.violations[0];
+    ok(`the page audits clean on every rule${v0 ? ` [${v0.rule} ${v0.path} ${v0.detail ?? ''}]` : ''}`,
+      Object.values(cts).reduce((a, b) => a + b, 0) === 0);
+
+    // and it must STAY clean with the cast bar shown mid-cast — the shown bar is
+    // the state the resting census never sees, so the suite audits it here
+    summonCast('Held Rite', 'fireball2', 2);
+    await wait(300);
+    const audit2 = runAudit(engine);
+    const cts2 = audit2.counts;
+    const w0 = audit2.violations[0];
+    ok(`a shown, mid-cast bar adds zero violations${w0 ? ` [${w0.rule} ${w0.path} ${w0.detail ?? ''}]` : ''}`,
+      cast.visible === true && cast.casting === true
+      && Object.values(cts2).reduce((a, b) => a + b, 0) === 0);
+    cast.interrupt(); // resolve the held rite before the loot loop below
+
+    // the kill: quest progress, toasts, xp — the whole loot loop (overlays live
+    // from here down, AFTER the audit)
+    const xp0 = state.xp;
+    hitTarget(state.target.hp, false);
+    await wait(200);
+    ok('the kill advances the hunt and pays out',
+      state.broodSlain === 1 && state.target.alive === false
+      && EldToast.live.length >= 2 && state.xp === xp0 + 420);
+
+    // xp crosses a level boundary exactly
+    const lvl0 = state.level;
+    const need = state.xpMax - state.xp + 60;
+    gainXp(need);
+    await wait(120);
+    ok('xp levels up across the boundary', state.level === lvl0 + 1 && state.xp === 60);
+
+    // the chat takes a submit and remembers it
+    const said0 = chat.scrollback.entries.length;
+    chat._submit('hello dark');
+    await wait(80);
+    ok('the chat logs a submit and remembers it',
+      chat.scrollback.entries.length === said0 + 1 && chat.history[chat.history.length - 1] === 'hello dark');
+
+    // hit-reach: the REAL probe answers for the action bar (the dispatch blind spot)
+    const hitAB = hitTest(engine, bar.worldX + bar.w / 2, bar.worldY + bar.h / 2);
+    ok('hit-reach: the action bar answers the real hit probe',
+      hitAB === bar || (bar.isAncestorOf ? bar.isAncestorOf(hitAB) : false));
+
+    // Enter-to-chat: a free Enter hands the keyboard to the
+    // say bar; a send hands it back (both halves of the loop, on the bus channel)
+    engine.setFocus(null);
+    await wait(40);
+    engine.bus.emit('keydown', { key: 'Enter' });
+    await wait(40);
+    ok('a free Enter focuses the chat input in its editing state',
+      engine.focusedNode === chat.field && chat.field._wantsTextInput === true);
+    chat.field.setValue('a hail into the dark');
+    chat.field.dispatch('keydown', { key: 'Enter' });
+    await wait(40);
+    ok('a send hands the keyboard back to the game', engine.focusedNode === null);
+    ok('no errors reached the console during the run', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `GAMEHUD ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+} else {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'GAMEHUD READY';
+  }, 1000);
+}
+</script>
+</body>
+</html>

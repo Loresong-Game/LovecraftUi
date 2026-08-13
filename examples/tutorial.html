@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Tutorial</title>
+<!-- @demo   The Guiding Hand: a sequenced tour teaching a small scene's own widgets — spotlight cutouts, coachmark callouts, four advance modes.
+     @shows  TutorialSequencer, Spotlight, Coachmark, EldWindow, ItemGrid, ProgressBar, EventLog, RadialMenu, Button, Slider, Select, TextNode, UINode, QuadNode
+     @params ?freeze=1 — bit-stable snapshot boot (no beacon) · ?assert=1 — the in-page suite titles its own PASS count -->
+
+<!-- the proof page: a TutorialSequencer walks a practice window end to end —
+     a narration card (manual), click-the-button (click), pull-the-slider (change),
+     choose-a-stance (change — the dropdown RISES above the scrim like it does under
+     a modal), a circle cutout (morphing from the previous rect), and a farewell.
+     Escape or Skip aborts; the tour is restartable from the page's own button. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {
+  Eldritch, EldWindow, TutorialSequencer, Spotlight, Coachmark, ItemGrid,
+  ProgressBar, EventLog, RadialMenu, Button, Slider, Select, TextNode, UINode, QuadNode,
+  runAudit, hitTest, COLORS, FONTS,
+} from '../src/lovecraft-ui.js';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+// INSTRUMENTED: the beacon (a Spotlight + Coachmark inviting the tour) arrives on a
+// double rAF, because it needs the Begin button's WORLD rect and that only exists
+// after a layout pass. Under the states walker that made the walked population race
+// the beacon's arrival - measured 25 then 24 on back-to-back runs, which is a flaky
+// gate, not a page fault. Every census now reads the page WITHOUT the invitation.
+const INSTRUMENTED = FROZEN || ASSERT
+  || params.has('audit') || params.has('torture') || params.has('resize');
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+
+// ---- the icon pack (optional download): the RE-SKIN idiom ----
+// `as:` points at icon ids this page ALREADY uses, so the registry re-bakes those NAMES
+// in place: every live quad follows with no page code and no atlas movement.
+// `fallback: 'none'` leaves the procedural art standing when assets/ is absent, which is
+// the shipped default - the pack is an optional download and the page must not need it.
+// Skipped under FROZEN: --screenshot captures at the load event and cannot wait for an
+// async decode, so frozen baselines run on the procedural art by necessity.
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-3649', as: 'book' },
+      { id: 'ico-0210', as: 'shield' },
+      { id: 'ico-0513', as: 'sword' },
+      { id: 'ico-0489', as: 'blindinglight' },
+      { id: 'ico-0707', as: 'arrows' },
+      { id: 'ico-0307', as: 'leafs' },
+      { id: 'ico-0394', as: 'deathkiss' },
+      { id: 'ico-0017', as: 'fireball' },
+      { id: 'ico-0078', as: 'fireball2' },
+    ],
+  });
+}
+
+window.engine = engine;
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+
+// ---- the lamp room: ONE page-owned canvas, painted on resize ----
+// A tutorial is only as good as the thing it teaches. This page used to teach a bare
+// form - a button, a slider and a select on an empty panel over 85% black - which is
+// STYLE section 1's "label:input grid of form rows" with a spotlight over it. The tour
+// now walks a real warding bench in a real room, and the sealed dark actually has
+// something to seal.
+const room = new UINode({ name: 'lamp-room' });
+const bdCanvas = document.createElement('canvas');
+const bdTex = new THREE.CanvasTexture(bdCanvas);
+bdTex.colorSpace = THREE.SRGBColorSpace;
+bdTex.minFilter = THREE.LinearFilter;
+bdTex.magFilter = THREE.LinearFilter;
+bdTex.generateMipmaps = false;
+const bdQuad = new QuadNode({ texture: bdTex });
+room.add(bdQuad);
+engine.layers.background.add(room);
+room.on('dispose', () => bdTex.dispose());
+const srnd = (n) => { let s = n; return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff; };
+
+function paintRoom() {
+  const W = Math.max(2, Math.round(engine.width)), H = Math.max(2, Math.round(engine.height));
+  if (bdCanvas.width !== W || bdCanvas.height !== H) { bdCanvas.width = W; bdCanvas.height = H; }
+  const ctx = bdCanvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#0a0d0c';
+  ctx.fillRect(0, 0, W, H);
+
+  // Coursed wall stone, seeded for bit-stability. The first pass jittered each stone's
+  // RGB and it read as a bright olive patchwork - a 90s tiling texture, not a dark
+  // room. The value is now FLAT and near the background; the courses are carried by
+  // mortar shadow and a single lit top edge, which is how stone reads at night.
+  const r = srnd(7717);
+  const CH = 44;
+  ctx.fillStyle = '#121614';
+  ctx.fillRect(0, 0, W, H);
+  for (let row = 0, y = 0; y < H; row++, y += CH) {
+    const off = (row % 2) * 62;
+    for (let x = -62 + off; x < W + 62; x += 124) {
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';               // the mortar joint, in shadow
+      ctx.fillRect(x, y, 124, CH);
+      ctx.fillStyle = `rgba(24,29,26,${0.85 + r() * 0.15})`;
+      ctx.fillRect(x + 3, y + 3, 118, CH - 6);
+      ctx.strokeStyle = 'rgba(70,80,72,0.13)';          // one lit edge per stone
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x + 3, y + 3.5); ctx.lineTo(x + 121, y + 3.5);
+      ctx.stroke();
+    }
+  }
+  // the shuttered window, with the harbour night behind it
+  const wx = Math.round(W * 0.70), wy = Math.round(H * 0.12), ww = 190, wh = 150;
+  ctx.fillStyle = '#050a0e';
+  ctx.fillRect(wx, wy, ww, wh);
+  ctx.fillStyle = 'rgba(88,200,143,0.05)';
+  ctx.fillRect(wx, wy + wh * 0.62, ww, wh * 0.38);
+  ctx.strokeStyle = 'rgba(69,78,71,0.85)';
+  ctx.lineWidth = 5;
+  ctx.strokeRect(wx, wy, ww, wh);
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(wx + ww / 2, wy); ctx.lineTo(wx + ww / 2, wy + wh);
+  ctx.moveTo(wx, wy + wh / 2); ctx.lineTo(wx + ww, wy + wh / 2);
+  ctx.stroke();
+
+  // the bench top: a band of worn boards across the lower third
+  const bt = Math.round(H * 0.60);
+  ctx.fillStyle = '#1a1512';
+  ctx.fillRect(0, bt, W, H - bt);
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, bt, W, 7);
+  ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 9; i++) {
+    const y = Math.round(bt + (i * (H - bt)) / 9) + 0.5;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  // the lamp: the only warm thing in the room, pooling on the boards
+  const lx = Math.round(W * 0.30), ly = Math.round(H * 0.50);
+  const pool = ctx.createRadialGradient(lx, ly, 12, lx, ly, Math.max(W, H) * 0.42);
+  pool.addColorStop(0, 'rgba(232,216,106,0.13)');
+  pool.addColorStop(0.5, 'rgba(232,216,106,0.045)');
+  pool.addColorStop(1, 'rgba(232,216,106,0)');
+  ctx.fillStyle = pool;
+  ctx.fillRect(0, 0, W, H);
+  bdTex.needsUpdate = true;
+}
+// zero-sized wrapper: a full-screen node beside the HUD siblings overlaps every one
+room.onLayout = function () {
+  bdQuad.setRect(0, 0, engine.width, engine.height);
+  paintRoom();
+};
+
+// ---- the reagents on the bench ----
+Eldritch.registerItem('moss', { name: 'Grave Moss', icon: 'leafs', rarity: 'common', stackMax: 20, desc: 'Damp. It keeps its colour indoors.' });
+Eldritch.registerItem('dust', { name: 'Bone Dust', icon: 'deathkiss', rarity: 'rare', stackMax: 20, desc: 'Ground fine. Do not breathe it.' });
+Eldritch.registerItem('oil', { name: 'Lamp Oil', icon: 'blindinglight', rarity: 'common', stackMax: 20, desc: 'Enough for one more night.' });
+Eldritch.registerItem('chalk', { name: 'Sigil Chalk', icon: 'book', rarity: 'epic', stackMax: 20, desc: 'It writes on anything. That is the trouble.' });
+
+// ---- the warding bench: the scene the tour actually teaches ----
+let invoke, dread, stance, wardBar, reagents;
+const win = EldWindow.create({
+  title: 'The Warding Bench',
+  // 420 tall: the ladder below DERIVES every rung from the reagent grid's bottom
+  // and ends with the Bind button near y=346; the header plus the frame insets
+  // eat about 60. Undersizing clips the button and arms a scrollbar over nothing.
+  width: 430, height: 420, x: 76, y: 96,
+  content: (c) => {
+    const reagentLabel = new TextNode('Reagents', {
+      font: FONTS.header, size: 12, smallCaps: true, letterSpacing: 1, color: COLORS.textMuted, shadow,
+    });
+    reagentLabel.setPos(12, 6);
+    reagents = new ItemGrid({ cols: 4, rows: 2 });
+    reagents.setPos(10, 26);
+    reagents.setItem(0, 'moss', 6);
+    reagents.setItem(1, 'dust', 3);
+    reagents.setItem(2, 'oil', 2);
+    reagents.setItem(3, 'chalk', 1);
+
+    const dreadLabel = new TextNode('Ward Strength', {
+      font: FONTS.header, size: 12, smallCaps: true, letterSpacing: 1, color: COLORS.textMuted, shadow,
+    });
+    const gy = reagents.y + reagents.h + 10; // the ladder base: grid bottom + a 10px seam (the old literals sat flush against 44px slots)
+    dreadLabel.setPos(12, gy);
+    dread = new Slider({ min: 0, max: 100, value: 20, width: 240 });
+    dread.setPos(10, gy + 20);
+
+    const stanceLabel = new TextNode('Sigil', {
+      font: FONTS.header, size: 12, smallCaps: true, letterSpacing: 1, color: COLORS.textMuted, shadow,
+    });
+    stanceLabel.setPos(12, gy + 56);
+    stance = new Select({ options: ['Warding', 'Reaping', 'Silent'], value: 'Warding', width: 240 });
+    stance.setPos(10, gy + 76);
+
+    // ONE rail, top to bottom: the inputs, then the integrity gauge across the
+    // full lane (it previews the slider live), then the action anchoring the
+    // foot. The old seat crammed button, label, and bar into one corner on
+    // three different baselines — the jumble this ladder replaces — and the
+    // label now wears the same header face as its three siblings.
+    const wardLabel = new TextNode('Ward Integrity', {
+      font: FONTS.header, size: 12, smallCaps: true, letterSpacing: 1, color: COLORS.textMuted, shadow,
+    });
+    wardLabel.setPos(12, gy + 118);
+    wardBar = new ProgressBar({ value: 20, width: 370 });
+    wardBar.setPos(10, gy + 138);
+
+    invoke = new Button('Bind the Ward', { onClick: () => bindWard() });
+    invoke.setPos(10, gy + 172);
+
+    c.add(reagentLabel, reagents, dreadLabel, dread, stanceLabel, stance, wardLabel, wardBar, invoke);
+  },
+});
+
+// ---- the keeper's log: the room answers what you do on the bench ----
+const log = new EventLog({ width: 340, height: 230 }); // 300x190 -> 340x230 @(small text boxes; the bench's answers wrap whole now)
+engine.layers.background.add(log);
+function say(msg, tag) {
+  if (FROZEN) log.append('[--:--:--]', tag ?? 'HALL', msg);
+  else log.log(msg, tag ?? 'HALL');
+}
+say('The lamp is lit. The bench is set.', 'ROOM');
+
+// the bench does something: the ward reads the slider, and binding it spends chalk
+function bindWard() {
+  wardBar.setValue(dread.value);
+  const chalk = reagents.getItem(3);
+  if (chalk && chalk.count > 0) {
+    const left = chalk.count - 1;
+    if (left > 0) reagents.setItem(3, 'chalk', left, { silent: true });
+    else reagents.clearSlot(3, { silent: true });
+    say(`The ${String(stance.value).toLowerCase()} sigil is bound at ${Math.round(dread.value)}.`, 'WARD');
+  } else {
+    say('No chalk remains. The sigil will not hold.', 'WARD');
+  }
+}
+dread.on('change', () => wardBar.setValue(dread.value));
+
+// ---- the page's own chrome: a status line + restart, OUTSIDE the tour ----
+const status = new TextNode('The Guiding Hand awaits.', { size: 12, color: COLORS.textMuted, shadow });
+status.setPos(16, 16);
+engine.layers.background.add(status);
+
+const restart = new Button('Begin the Tour', { onClick: () => startTour() });
+restart.setPos(16, 40);
+engine.layers.background.add(restart);
+
+// the log sits beside the bench, clear of the window and the bottom strip
+const chrome = new UINode({ name: 'tutorial-chrome' });
+engine.layers.background.add(chrome);
+chrome.onLayout = function () {
+  log.setPos(Math.max(540, engine.width - log.w - 40), Math.round(engine.height * 0.46));
+};
+
+// ---- the beacon: STANDALONE Spotlight + Coachmark inviting the tour ----
+// (the sequencer composes these same two; here they run bare — a spotlight that
+// tracks the begin button and a callout whose Next starts the lessons)
+let beacon = null, beaconMark = null;
+function showBeacon() {
+  if (beacon) return;
+  beacon = new Spotlight({ opacity: 0.55 });
+  engine.layers.overlay.add(beacon);
+  beacon.setTarget(restart, { pad: 10 });
+  beaconMark = new Coachmark({ title: 'A Hand Extends', text: 'The practice hall can teach itself.', showSkip: false, onNext: () => startTour() });
+  beaconMark.setContent({ title: 'A Hand Extends', text: 'The practice hall can teach itself.', showSkip: false, nextLabel: 'Begin' });
+  engine.layers.overlay.add(beaconMark);
+  beaconMark.placeNear(beacon.cutoutRect);
+}
+function clearBeacon() {
+  if (beacon) { beacon.dispose(); beacon = null; }
+  if (beaconMark) { beaconMark.dispose(); beaconMark = null; }
+}
+
+// ---- the tour itself: one sequencer, six lessons, four advance modes ----
+let tour = null;
+function startTour() {
+  if (tour && !tour.disposed) return; // one tour at a time; it disposes itself when done
+  clearBeacon();
+  tour = new TutorialSequencer({
+    steps: [
+      {
+        target: null, advance: 'manual',
+        title: 'The Guiding Hand',
+        text: 'The lamp will not last the night, and the ward is down. I will walk you through binding it. Only the lit ground answers your touch — the dark is sealed. Escape or Skip abandons the lesson.',
+      },
+      {
+        target: invoke, advance: 'click',
+        title: 'Bind It Once',
+        text: 'Press it. The ward takes whatever strength the bench is set to, and it spends a stick of chalk doing it. Nothing outside the light will respond.',
+      },
+      {
+        target: dread, advance: 'change',
+        title: 'Set the Strength',
+        text: 'Drag the rail — or focus it and use the arrows. The integrity bar under the bench follows you as you go.',
+      },
+      {
+        target: stance, advance: 'change',
+        title: 'Choose the Sigil',
+        text: 'Warding holds, Reaping bites, Silent hides. Open it and pick one; the dropdown rises above the veil rather than under it.',
+      },
+      {
+        target: () => reagents, advance: 'manual', shape: 'circle', pad: 14,
+        title: 'What It Costs',
+        text: 'Chalk, moss, dust, oil. Every binding takes from this tray. Cutouts may be circles — between lessons the hole morphs to its new shape.',
+      },
+      {
+        target: () => win, advance: 'manual',
+        title: 'The Bench Is Yours',
+        text: 'Bind it as often as the chalk allows. Finish to lift the veil.',
+      },
+    ],
+    onStep: (i) => status.setText(`Lesson ${i + 1} of 6.`),
+    onDone: (completed) => {
+      status.setText(completed ? 'The tour is complete.' : 'The tour was abandoned.');
+      setTimeout(showBeacon, 300); // re-invite once the veil's fade lands
+    },
+  });
+  tour.start();
+}
+
+// Worlds are computed per frame: the beacon aims at the button's world rect, so it
+// waits out the first engine tick before placing itself. FROZEN/ASSERT skip the
+// beacon: rAF never fires under headless dump-dom, and a static boot needs no
+// invitation (the suite starts the tour itself).
+if (!INSTRUMENTED) requestAnimationFrame(() => requestAnimationFrame(showBeacon));
+
+// ---- the input replay's handle bag (the seventh instrument): handles, never coordinates ----
+window.__tut = {
+  beaconNext: () => (beaconMark && !beaconMark.disposed ? beaconMark.nextBtn : null),
+  tour: () => tour,
+  next: () => tour?.coach?.nextBtn ?? null,
+  invoke: () => invoke,
+  dread: () => dread,
+  stance: () => stance,
+  status: () => status._text,
+  ground: () => ground,
+};
+
+// ---- the ground circle: right-click on the study opens the wheel.
+// Begin is the beacon's own invitation (startTour self-guards: one tour at a
+// time); Next presses the live coachmark's own button and no-ops politely
+// when no lesson stands.
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'tour', label: 'Tour', children: [
+ { id: 'begin', label: 'Begin' },
+ { id: 'next', label: 'Next' },
+ ] },
+ ],
+});
+ground.on('select', ({ id, path }) => {
+  if (path[0] !== 'tour') return;
+  if (id === 'begin') startTour();
+  else if (id === 'next') tour?.coach?.nextBtn?.dispatch('click', {});
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+
+// ---- ?assert=1: the in-page suite (the four advance modes, driven) ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    await wait(500);
+
+    const audit = runAudit(engine);
+    const cts = audit.counts;
+    const v0 = audit.violations[0];
+    ok(`the hall audits clean on every rule${v0 ? ` [${v0.rule} ${v0.path} ${v0.detail ?? ''}]` : ''}`,
+      Object.values(cts).reduce((a, b) => a + b, 0) === 0);
+    // the bench holds one rail: the whole ladder fits its box, no rail at rest —
+    // on EITHER axis (a 396px gauge armed a horizontal rail here and the first
+    // cut of this pin, vertical-only, waved it through: the loose-bound face)
+    {
+      const sa = win.contentArea, slack = sa.boxH - sa.contentH;
+      ok(`the bench ladder fits its box — no rail at rest on either axis [boxH ${sa.boxH} contentH ${sa.contentH} boxW ${sa.boxW} contentW ${sa.contentW}]`,
+        sa.vBarVisible === false && sa.maxScroll === 0 && slack >= 0 && slack <= 24
+        && sa.maxScrollX === 0 && sa.hThumb?.visible !== true);
+    }
+    // the pre-tour baseline, keyed rule|path (the torture walker's newReal form):
+    // the mid-tour audit below compares ADDITIVELY against this
+    const baseKeys = new Set(audit.violations.map((v) => v.rule + '|' + v.path));
+
+    // the tour starts on its narration card
+    startTour();
+    await wait(300);
+    ok('the tour starts on its narration card',
+      tour.index === 0 && status._text === 'Lesson 1 of 6.');
+
+    // manual, click, and change lessons advance through the widgets' own events
+    tour.next();
+    await wait(200);
+    const atClick = tour.index === 1;
+
+    // the page's thesis, measured for real: "Nothing outside the light will respond."
+    // dispatch bypasses hit testing, so only the exported hitTest can prove either
+    // half of the lit-ground law — the cutout ANSWERS at the bench's button, and a
+    // probe out in the dark lands on the veil and nowhere else.
+    const cut = tour.spotlight.cutoutRect;
+    const litHit = hitTest(engine, invoke.worldX + invoke.w / 2, invoke.worldY + invoke.h / 2);
+    const darkHit = hitTest(engine, cut.x - 40, cut.y + cut.h / 2);
+    ok('the lit ground answers and the dark is sealed (real hitTest, both directions)',
+      litHit != null && (litHit === invoke || invoke.isAncestorOf(litHit))
+      && darkHit === tour.spotlight);
+
+    // the audit has never once seen this scene (runAudit ran pre-tour): re-run it
+    // WITH the spotlight and coachmark up and require zero NEW violations over the
+    // baseline — additive, not absolute. Reach violations whose blocker is the
+    // tour's own veil are the lit-ground law WORKING (the resize walker's carve-out
+    // for the surface it drives, torture.js newReal); any other new violation fails.
+    const up = runAudit(engine);
+    const fresh = up.violations.filter((v) =>
+      !baseKeys.has(v.rule + '|' + v.path)
+      && !(v.rule === 'reach' && v.blocker
+        && (v.blocker === tour.spotlight || tour.isAncestorOf(v.blocker))));
+    ok(`the raised veil introduces zero new violations over the pre-tour baseline${fresh[0] ? ` [${fresh[0].rule} ${fresh[0].path} ${fresh[0].detail ?? ''}]` : ''}`,
+      fresh.length === 0);
+
+    invoke.dispatch('click', {});
+    await wait(200);
+    ok('the click lesson advances on the button\'s own click', atClick && tour.index === 2);
+
+    dread.setValue(55, { silent: false });
+    await wait(200);
+    const atStance = tour.index === 3;
+    stance.setValue('Reaping', { silent: false });
+    await wait(200);
+    ok('the change lessons advance on loud commits', atStance && tour.index === 4);
+
+    // the circle and farewell finish the tour; the veil lifts
+    tour.next();
+    await wait(200);
+    tour.next();
+    await wait(400);
+    ok('finishing lifts the veil', status._text === 'The tour is complete.');
+
+    // a fresh tour abandons through abort (the Escape/Skip path)
+    startTour();
+    await wait(300);
+    tour.abort();
+    await wait(300);
+    ok('escape abandons the lesson', status._text === 'The tour was abandoned.');
+
+    // the ground circle: right-click on the study opens the wheel, and
+    // the nested Tour>Begin pick starts the lessons through the beacon's own door
+    engine.bus.emit('pointerdown', { x: 900, y: 600, button: 2, pointerId: 64, target: null, native: null });
+    await wait(60);
+    ok('ground: a right-click on the study opens the wheel',
+      window.__tut.ground().isOpen === true);
+    window.__tut.ground()._setIndex(0, false); // Tour
+    window.__tut.ground().onActivate();
+    await wait(40);
+    window.__tut.ground()._setIndex(0, false); // Begin
+    window.__tut.ground().onActivate();
+    await wait(300);
+    ok('ground: the nested Begin pick starts the tour through startTour',
+      window.__tut.ground().isOpen === false && status._text === 'Lesson 1 of 6.');
+    tour.abort();
+    await wait(300);
+
+    ok('the whole tour ran without a single page error', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `TUTORIAL ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+} else {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'TUTORIAL READY';
+  }, 1000);
+}
+</script>
+</body>
+</html>

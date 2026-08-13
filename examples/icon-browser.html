@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Icon Browser</title>
+<!-- @demo   The Icon Vault: the full 3,840-icon pack on a virtualized shelf — search by name/slug/type/tag, filter by category or sheet, walk the shelves from ONE tab stop, and click or Enter a tile for its record and a copy-ready usage snippet. Sheets stream in as the grid reaches them and are released behind it, so browsing all sixty never accumulates sixty uploads.
+     @shows  VirtualList, VBox, HBox, TextField, Select, Button, EldToast, EldTooltip, IconButton, IconPalette, iconBase, glow, noGlow, RadialMenu, UINode, QuadNode, TextNode
+     @params ?freeze=1 — bit-stable snapshot boot: chrome only, the pack deliberately unloaded (see THE FROZEN SHELF below) · ?assert=1 — the in-page suite titles its own PASS count · ?torture=1 — the states walker runs on a BOUNDED shelf so the walk fits the test suite's virtual-time budget · ?shotdata=1 — the page photographs its own settled frame into a hidden #shotdata node -->
+
+<!-- The proof page for the optional icon pack (assets/icons). Every tile is a
+     texture.clone() view windowed onto one 128px cell of a 1024x1024 sheet;
+     clones share .source, so a sheet uploads once and the whole vault costs ZERO
+     atlas entries. pack.trim releases the shelves the grid has scrolled past.
+
+     THE FROZEN SHELF. `--screenshot` captures at the load event and cannot be
+     made to wait for an async decode: --virtual-time-budget blacks out a WebGL
+     page (measured), and a boot that awaited the pack photographed an empty
+     frame - which is exactly how this page's first baseline came to be a blank
+     4KB PNG that the frozen-shot check then "matched" forever. So the frozen boot
+     builds the chrome SYNCHRONOUSLY and does not load the pack at all: the
+     baseline is a real, deterministic picture of the interface, the shelf notice
+     says why it is bare, and the painted art is proved by ?assert=1 (which can
+     await) and reviewed through ?shotdata=1 (which photographs itself). -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import {
+  Eldritch, VirtualList, VBox, HBox, TextField, Select, Button, EldToast, EldTooltip,
+  IconButton, IconPalette, iconBase, glow, noGlow, RadialMenu,
+  UINode, QuadNode, TextNode, COLORS, FONTS, hitTest, socketInsetRaw,
+} from '../src/lovecraft-ui.js';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+const TORTURE = params.has('torture');
+const SHOTDATA = params.has('shotdata');
+
+// The states walker settles ~1.1s per hover target and a full shelf shows ~170
+// pooled tiles, which alone blows the test suite's virtual-time budget. Under
+// ?torture=1 the vault opens on a BOUNDED shelf: the same pooled tiles and the
+// same interaction art, just fewer of them, so the walk actually runs.
+const TORTURE_TILES = 24;
+// live sheets are bounded too: a visible window spans ~3 sheets, so 6 is slack
+const MAX_LIVE_SHEETS = 6;
+
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+window.engine = engine;
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+
+const place = (node, fn) => {
+  const own = node.onLayout?.bind(node);
+  node.onLayout = function () { own?.(); fn.call(this); };
+};
+
+const RAIL_W = 300;          // the rail's outer width
+const FIELD_W = RAIL_W - 36; // inside the panel frame's slice insets + padding
+const TILE = 64, PITCH = 74;
+// `slot.frame` bakes its recessed socket ONE TWELFTH of the box per side (the
+// socket law in theme.js — painters keep the RAW ratio so a stretched draw scales it).
+// Whatever size the frame is DRAWN at, the art has to sit in that socket; before the
+// law the tiles and the preview each guessed their own inset and the art overhung the
+// stone border. Derive it from the ONE function instead of guessing it.
+const socketRect = (box) => {
+  const i = Math.round(socketInsetRaw(box));
+  return [i, i, box - i * 2, box - i * 2];
+};
+
+// ---- the header ----
+const title = new TextNode('The Icon Vault', {
+  font: FONTS.header, size: 20, smallCaps: true, letterSpacing: 3, color: COLORS.accent, shadow,
+});
+title.setPos(24, 16);
+engine.layers.background.add(title);
+const countText = new TextNode('', { size: 12, color: COLORS.textMuted, shadow });
+place(countText, function () { this.setPos(engine.width - this.w - 24, 24); });
+engine.layers.background.add(countText);
+
+// ---- the left rail: a REAL stone panel, stacked by the layout engine ----
+// `frame:` makes the box own its background and folds the frame's slice insets
+// into its padding, so nothing in this rail is hand-placed arithmetic (the /
+// law the rest of the gallery follows).
+const rail = new VBox({ frame: 'panel.dark', padding: 10, gap: 8 });
+const railHead = new TextNode('Search the shelves', {
+  font: FONTS.header, size: 11, smallCaps: true, letterSpacing: 2, color: COLORS.bone, shadow,
+});
+const search = new TextField({ placeholder: 'name, slug, type, tag...', width: FIELD_W });
+const catSelect = new Select({ options: ['All categories'], value: 'All categories', width: FIELD_W });
+const sheetSelect = new Select({ options: ['All sheets'], value: 'All sheets', width: FIELD_W });
+
+// the detail block: the selected icon, whole — one node the VBox places as a unit
+const detail = new UINode({ name: 'detail' });
+const dPrev = new QuadNode({ texture: engine.textures.get('slot.frame') });
+const dArt = new QuadNode({ color: COLORS.voidBlack });
+const dName = new TextNode('', { font: FONTS.header, size: 15, smallCaps: true, letterSpacing: 1, color: COLORS.accent, shadow, maxWidth: FIELD_W - 106, ellipsis: true });
+const dId = new TextNode('', { font: FONTS.mono, size: 11, color: COLORS.bone, shadow, maxWidth: FIELD_W - 106, ellipsis: true });
+const dType = new TextNode('', { size: 11, color: COLORS.textMuted, shadow, multiline: true, maxWidth: FIELD_W - 106 });
+const dTags = new TextNode('', { size: 10, color: COLORS.textFaint, shadow, multiline: true, maxWidth: FIELD_W });
+const dSnip = new TextNode('', { font: FONTS.mono, size: 9, color: COLORS.text, shadow, multiline: true, maxWidth: FIELD_W });
+detail.add(dPrev, dArt, dName, dId, dType, dTags, dSnip);
+dPrev.setRect(0, 0, 96, 96);
+dArt.setRect(...socketRect(96));
+dName.setPos(104, 4);
+dId.setPos(104, 28);
+dType.setPos(104, 46);
+detail.setSize(FIELD_W, 230);
+place(detail, function () {
+  dTags.setPos(0, 104);
+  dSnip.setPos(0, Math.round(104 + dTags.h + 10));
+  this.setSize(FIELD_W, Math.round(104 + dTags.h + 10 + dSnip.h + 4));
+});
+
+const copyRow = new HBox({ gap: 8 });
+const copyId = new Button('Copy id', { minWidth: 106, onClick: () => copySel('id') });
+const copySnip = new Button('Copy snippet', { minWidth: 136, onClick: () => copySel('snippet') });
+copyRow.add(copyId, copySnip);
+
+const hint = new TextNode('Tab reaches the shelves. Arrows walk, Enter opens.', {
+  size: 10, color: COLORS.textFaint, shadow, multiline: true, maxWidth: FIELD_W,
+});
+
+// ---- your own sigils (absorbed from the retired custom-icons.html) ----
+// The two halves of the same subject were on two pages: this one browses the 3,840
+// icons that SHIP, and custom-icons.html showed how to register your own - over ~65%
+// black, with nothing shipped to compare them against. Registered ids work anywhere a
+// built-in id does, so the honest place to prove it is beside the shelves. These are
+// PROCEDURAL, so unlike the pack they render even with assets/ deleted, which is the
+// degrade this page documents.
+Eldritch.registerIcon('third-eye', (ctx, w, h) => {
+  iconBase(ctx, w, h);
+  glow(ctx, '#8fd8ff', 10);
+  ctx.strokeStyle = '#bfe8ff';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(w / 2, h / 2, w * 0.3, h * 0.18, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = '#e8f6ff';
+  ctx.beginPath();
+  ctx.arc(w / 2, h / 2, 5, 0, Math.PI * 2);
+  ctx.fill();
+  noGlow(ctx);
+});
+// registerAbility = the painter AND the tooltip lore in one call; the id joins
+// ABILITY_ICON_IDS, so palettes and slots treat it like a built-in rite.
+Eldritch.registerAbility('void-lantern', {
+  name: 'Void Lantern',
+  desc: 'Casts light that illuminates nothing and reveals everything.',
+  stats: '2s cast | Consumes 1 tallow',
+  flavor: 'The dark is a curtain. The lantern is a hand.',
+  painter: (ctx, w, h) => {
+    iconBase(ctx, w, h);
+    glow(ctx, '#ffd98f', 12);
+    ctx.strokeStyle = '#ffe9bf';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(w * 0.32, h * 0.28, w * 0.36, h * 0.44);
+    ctx.fillStyle = '#fff3d6';
+    ctx.fillRect(w * 0.44, h * 0.42, w * 0.12, h * 0.16);
+    noGlow(ctx);
+  },
+});
+const sigilHead = new TextNode('Your own sigils', {
+  font: FONTS.header, size: 12, smallCaps: true, letterSpacing: 1, color: COLORS.accent, shadow,
+});
+const sigilRow = new HBox({ gap: 8 });
+const sigilThird = new IconButton('third-eye', {});
+const sigilLantern = new IconButton('void-lantern', {});
+EldTooltip.attach(sigilThird, { title: 'Third Eye', desc: 'registerIcon(id, painter) — art only.' });
+const sigilPalette = new IconPalette(['fireball', 'shield', 'void-lantern'], { perRow: 3 });
+sigilRow.add(sigilThird, sigilLantern, sigilPalette);
+const sigilNote = new TextNode('registerIcon / registerAbility ids work anywhere a shipped id does — and they are procedural, so they survive a deleted assets/ folder.', {
+  size: 10, color: COLORS.textFaint, shadow, multiline: true, maxWidth: FIELD_W,
+});
+
+rail.add(railHead, search, catSelect, sheetSelect, detail, copyRow, hint, sigilHead, sigilRow, sigilNote);
+place(rail, function () { this.setRect(24, 56, RAIL_W, Math.max(200, engine.height - 80)); });
+engine.layers.background.add(rail);
+
+// the shelf notice: only the frozen baseline ever shows it (see the header note)
+const shelfNote = new TextNode('', { size: 12, color: COLORS.textFaint, shadow, multiline: true, maxWidth: 460 });
+shelfNote.visible = false; // only the frozen baseline ever shows it
+engine.layers.background.add(shelfNote);
+
+let pack = null;
+let selected = null;
+let selView = null;
+let filtered = [];
+let perRow = 12;
+let col = 0; // the column cursor inside the focused row
+
+function snippetFor(rec) {
+  return `await Eldritch.loadIcons({\n  base: 'assets/icons',\n  icons: [{ id: '${rec.id}', as: 'my_icon' }],\n});`;
+}
+function select(rec) {
+  if (!rec || !pack) return;
+  selected = rec;
+  dName.setText(rec.name);
+  dId.setText(`${rec.id} · ${rec.sheet}`);
+  dType.setText(rec.type);
+  dTags.setText(rec.tags.join(' · '));
+  dSnip.setText(snippetFor(rec));
+  const seat = () => {
+    selView?.dispose();
+    selView = pack.view(rec.id);
+    if (selView) { dArt.setTexture(selView); dArt.setColor(0xffffff); } // no tint over the art
+    touchSheet(rec.sheet); // the selection PINS its shelf against the trim
+  };
+  if (pack.texture(rec.sheet)) seat();
+  else {
+    // same quiet-refusal law as streamShelf: a missing shelf degrades the
+    // detail art, it does not stamp ERROR@ (the pack is optional)
+    pack.ensure([rec.sheet]).then(() => { if (selected === rec) seat(); })
+      .catch((err) => console.warn(`LovecraftUI icon vault: shelf ${rec.sheet} did not load (${err?.message ?? err}).`));
+  }
+  detail.invalidateLayout();
+  rail.invalidateLayout();
+  seatColWash();
+}
+function copySel(kind) {
+  if (!selected) return;
+  const text = kind === 'id' ? selected.id : snippetFor(selected);
+  window.__copied = text;
+  navigator.clipboard?.writeText?.(text)?.catch?.(() => {});
+  EldToast.show({ title: kind === 'id' ? 'Icon id copied' : 'Snippet copied', message: selected.id, duration: 2 });
+}
+
+// ---- shelf memory: sheets are released behind the scroll ----
+// A view holds its sheet's source alive until its tile rebinds, so trimming is
+// safe by construction; this only stops sixty uploads from accumulating.
+const sheetTouch = new Map(); // sheetId -> monotonic tick
+let touchTick = 0;
+function touchSheet(id) { sheetTouch.set(id, ++touchTick); }
+function trimShelves() {
+  if (!pack || sheetTouch.size <= MAX_LIVE_SHEETS) return;
+  const keep = [...sheetTouch.entries()]
+    .sort((a, b) => b[1] - a[1]).slice(0, MAX_LIVE_SHEETS).map((e) => e[0]);
+  for (const id of [...sheetTouch.keys()]) if (!keep.includes(id)) sheetTouch.delete(id);
+  pack.trim(keep);
+}
+
+// ---- the grid: a virtualized shelf of tiles, ONE tab stop ----
+const pendingSheets = new Set();
+// The streaming fetch, shared by renderRow and the suite. A shelf that fails to
+// load refuses QUIETLY — the pack is an optional download, so a 404 sheet is
+// degraded art, never an ERROR@ title (the rejection used to fly unhandled off
+// the live scroll path) — and it un-strands its pending slot, or the
+// shelf could never retry on a later scroll.
+const streamShelf = (s) => {
+  if (!pack || pendingSheets.has(s)) return null;
+  pendingSheets.add(s);
+  return pack.ensure([s])
+    .then(() => { pendingSheets.delete(s); touchSheet(s); list.refresh(); })
+    .catch((err) => { pendingSheets.delete(s); console.warn(`LovecraftUI icon vault: shelf ${s} did not load (${err?.message ?? err}).`); });
+};
+const list = new VirtualList({
+  rowH: PITCH,
+  rowFocus: true, // the LIST is one Tab stop; Up/Down walk rows (the contract)
+  renderRow: (node, row) => {
+    if (!node._tiles) {
+      node._tiles = [];
+      for (let i = 0; i < 16; i++) {
+        const slot = new UINode({ interactive: true });
+        const bg = new QuadNode({ texture: engine.textures.get('slot.frame') });
+        const icon = new QuadNode({ color: 0x0a0f0c });
+        // the wash sits exactly on the tile box, so it needs NO audit allowance:
+        // the census reported 336 of this page's 338 declarations DEAD, which
+        // is a cap masking nothing. Exemptions are earned, not sprinkled.
+        const wash = new QuadNode({ color: COLORS.accent, opacity: 0 });
+        slot.add(bg, icon, wash);
+        slot._bg = bg; slot._icon = icon; slot._wash = wash; slot._view = null; slot._rec = null;
+        bg.setRect(0, 0, TILE, TILE);
+        icon.setRect(...socketRect(TILE)); // seated IN the socket, not over its rim
+        wash.setRect(0, 0, TILE, TILE);
+        slot.setSize(TILE, TILE);
+        slot.on('pointerenter', () => { if (!slot.closest((n) => n.disabled === true)) slot._wash.setBaseOpacity(0.15); });
+        slot.on('pointerleave', () => slot._wash.setBaseOpacity(0));
+        slot.on('pointerdown', () => slot._wash.setBaseOpacity(0.25));
+        slot.on('pointerup', (e) => slot._wash.setBaseOpacity(e.canceled ? 0 : 0.15));
+        // the click seats the COLUMN too: the list widget seats the row
+        // focus itself now, and the vault's own column model must land on the
+        // same tile, or the next Enter would take a neighbor
+        slot.on('click', () => { if (slot._rec) { col = i; seatCursor(); select(slot._rec); } });
+        EldTooltip.attach(slot, () => (slot._rec
+          ? { title: slot._rec.name, desc: slot._rec.type, flavor: slot._rec.sheet }
+          : { title: '...' }));
+        node._tiles.push(slot);
+        node.add(slot);
+      }
+    }
+    const missing = new Set();
+    node._tiles.forEach((slot, i) => {
+      const rec = row[i] ?? null;
+      slot._rec = rec;
+      slot.visible = !!rec;
+      if (!rec) return;
+      slot.setPos(i * PITCH, Math.round((PITCH - TILE) / 2));
+      slot._view?.dispose();
+      slot._view = null;
+      const v = pack?.view(rec.id) ?? null;
+      if (v) { slot._view = v; slot._icon.setTexture(v); slot._icon.setColor(0xffffff); touchSheet(rec.sheet); }
+      else { slot._icon.setTexture(null); slot._icon.setColor(0x0a0f0c); missing.add(rec.sheet); }
+    });
+    // stream the shelves the grid has reached; refresh rebinds when they land
+    for (const s of missing) streamShelf(s);
+    trimShelves();
+  },
+});
+
+// The grid's keyboard model: VirtualList owns Up/Down/Home/End/Enter over ROWS;
+// the vault adds Left/Right over COLUMNS and a cursor ring, so all 3,840 tiles
+// are reachable from ONE tab stop instead of being mouse-only.
+const cursor = new QuadNode({ texture: engine.textures.get('slot.hover') });
+cursor.visible = false;
+cursor.auditAllow('overlap', 'containment'); // the focus ring rides ON the tile by design
+list.content.add(cursor);
+function seatCursor() {
+  const r = list.focusIndex;
+  const row = r >= 0 ? list.items[r] : null;
+  if (!row || engine.focusedNode !== list) { cursor.visible = false; return; }
+  col = Math.max(0, Math.min(col, row.length - 1));
+  cursor.visible = true;
+  cursor.setRect(col * PITCH, r * PITCH + Math.round((PITCH - TILE) / 2), TILE, TILE);
+}
+function cursorRec() {
+  const row = list.focusIndex >= 0 ? list.items[list.focusIndex] : null;
+  return row ? (row[Math.min(col, row.length - 1)] ?? null) : null;
+}
+// selection reads as a CROSSHAIR — the row wash the list already
+// paints crosses this column wash, so the exact selected tile is unambiguous
+// in both axes. Content coordinates: it scrolls with the rows, and it re-seats
+// whenever filters or a resize re-flow the grid (the column can change there).
+const colWash = new QuadNode({ color: COLORS.accent, opacity: 0.12 });
+colWash.visible = false;
+list.content.add(colWash);
+function seatColWash() {
+  const i = selected ? filtered.indexOf(selected) : -1;
+  if (i < 0) { colWash.visible = false; return; }
+  colWash.visible = true;
+  colWash.setRect((i % perRow) * PITCH, 0, TILE, Math.max(PITCH, list.items.length * PITCH));
+}
+list.on('rowfocus', () => seatCursor());
+list.on('focus', () => seatCursor());
+list.on('blur', () => { cursor.visible = false; });
+list.on('rowactivate', () => select(cursorRec()));
+list.on('keydown', (e) => {
+  if (list.disabled) return;
+  const d = { ArrowLeft: -1, ArrowRight: 1 }[e.key];
+  if (!d) return;
+  e.preventDefault?.();
+  const row = list.focusIndex >= 0 ? list.items[list.focusIndex] : null;
+  if (!row) return;
+  col = Math.max(0, Math.min(col + d, row.length - 1));
+  seatCursor();
+});
+
+place(list, function () {
+  const x = RAIL_W + 40;
+  this.setRect(x, 56, Math.max(120, engine.width - x - 24), Math.max(120, engine.height - 80));
+  const want = Math.max(4, Math.min(16, Math.floor((this.w - 8) / PITCH)));
+  if (want !== perRow) { perRow = want; rebuildRows(); }
+  seatCursor();
+  seatColWash();
+  shelfNote.setPos(x + 8, 78);
+});
+engine.layers.background.add(list);
+
+function rebuildRows() {
+  const rows = [];
+  for (let i = 0; i < filtered.length; i += perRow) rows.push(filtered.slice(i, i + perRow));
+  list.setItems(rows);
+  seatColWash();
+  countText.setText(pack
+    ? `${filtered.length} of ${pack.list.length} icons · ${pack.sheets.length} sheets`
+    : 'the pack is not loaded');
+}
+function applyFilter() {
+  if (!pack) return;
+  const cat = catSelect.value === 'All categories' ? null : catSelect.value;
+  const sheet = sheetSelect.value === 'All sheets' ? null : sheetSelect.value;
+  const text = search.value?.trim() || null;
+  filtered = pack.find({ category: cat, sheet, text });
+  if (TORTURE) filtered = filtered.slice(0, TORTURE_TILES); // the bounded walk shelf
+  rebuildRows();
+  list.scrollToIndex(0); // the real verb: a broken reset must fail loudly, not be swallowed
+  col = 0;
+  seatCursor();
+}
+search.on('input', applyFilter);
+search.on('change', applyFilter);
+catSelect.on('change', applyFilter);
+sheetSelect.on('change', applyFilter);
+
+// ---- the pack ----
+// The frozen baseline deliberately runs WITHOUT it (see the header note); every
+// other boot loads it, and ?shotdata=1 always does, because that artifact exists
+// precisely to show the settled, painted frame a screenshot cannot reach.
+function bareShelf(reason) {
+  shelfNote.setText(reason);
+  shelfNote.visible = true;
+  rebuildRows();
+}
+
+const packReady = (FROZEN && !SHOTDATA)
+  ? Promise.resolve(null)
+  : Eldritch.loadIconPack({ base: '../assets/icons' }).then(async (p) => {
+    pack = p;
+    await p.ensure(['sheet-001', 'sheet-002']); // the vault opens on lit shelves
+    catSelect.setOptions(['All categories', ...p.categories], { value: 'All categories', silent: true });
+    sheetSelect.setOptions(['All sheets', ...p.sheets.map((s) => s.id)], { value: 'All sheets', silent: true });
+    filtered = TORTURE ? p.list.slice(0, TORTURE_TILES) : p.list;
+    rebuildRows();
+    select(p.get('ico-0001'));
+    shelfNote.visible = false;
+    return p;
+  }).catch((err) => {
+    // The standing constraint is that EVERY page boots art-complete with the
+    // asset folders deleted — and this page, of all of them, must not be the
+    // exception that throws. A browser needs its manifest, so without one the
+    // vault shows its own chrome over a bare shelf and says so, instead of
+    // stamping a BOOT FAIL. ?assert=1 still fails loudly (it tests the pack).
+    console.warn(`LovecraftUI icon vault: the pack did not load (${err && err.message}).`);
+    pack = null;
+    bareShelf('The icon pack is not installed. assets/icons is optional: delete it and every '
+      + 'page still boots on the procedural painters — this one simply has nothing to show. '
+      + 'Restore the folder to browse all 3,840 icons.');
+    return null;
+  });
+
+if (FROZEN && !SHOTDATA) {
+  bareShelf('The shelf is bare in this baseline by design: the snapshot is taken at the load '
+    + 'event, which cannot wait for the pack to decode. Open the page (or ?shotdata=1) for the '
+    + 'painted vault; ?assert=1 proves the art lands.');
+}
+
+window.__vault = {
+  get pack() { return pack; }, list, rail, cursor, applyFilter, select, trimShelves,
+  get selected() { return selected; }, get col() { return col; }, get filtered() { return filtered; },
+  // drive handles (the seventh instrument): handles, never coordinates
+  listNode: () => list,
+  searchField: () => search,
+  copyIdBtn: () => copyId,
+  cursorId: () => cursorRec()?.id ?? null,
+  cursorVisible: () => cursor.visible,
+  focusIsList: () => engine.focusedNode === list,
+  pending: () => pendingSheets.size,
+  ground: () => ground,
+};
+
+// ---- the ground circle: right-click on the vault floor opens the
+// wheel — Copy rides the same button verbs, Filter clears the search through
+// the same applyFilter every field drives.
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'copy', label: 'Copy', children: [
+ { id: 'id', label: 'Copy Id' },
+ { id: 'snippet', label: 'Snippet' },
+ ] },
+ { id: 'clear', label: 'Clear Search' },
+ ],
+});
+ground.on('select', ({ id, path }) => {
+  if (path[0] === 'copy') (id === 'id' ? copyId : copySnip).dispatch('click', {});
+  else if (id === 'clear') { search.setValue('', { silent: false }); applyFilter(); }
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+
+// ---- READY / ASSERT ----
+if (!ASSERT) {
+  packReady.then(() => {
+    // one settled frame, then (under ?shotdata=1) the canvas pixels ride the DOM
+    // for a review harvester — the honest way to LOOK at an async-boot page
+    engine._frame(0, 0);
+    if (SHOTDATA) {
+      engine._frame(0, 0);
+      const holder = document.createElement('div');
+      holder.id = 'shotdata';
+      holder.style.display = 'none';
+      holder.textContent = engine.canvas.toDataURL('image/png');
+      document.body.appendChild(holder);
+    }
+    setTimeout(() => {
+      document.title = window.__errs.length ? 'ICONBROWSER BOOT FAIL: ' + window.__errs[0] : 'ICONBROWSER READY';
+    }, 1000);
+  }).catch((e) => { document.title = 'ICONBROWSER BOOT FAIL: ' + String(e && (e.message || e)).slice(0, 80); });
+} else {
+  (async () => {
+    const results = [];
+    let fails = 0;
+    const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    await packReady;
+    await wait(400);
+
+    ok('boot: the vault stands (3,840 records, 60 sheets, no errors)',
+      window.__errs.length === 0 && pack.list.length === 3840 && pack.sheets.length === 60);
+    const r1 = pack.get('ico-0001');
+    ok('resolve: icon_id and slug reach the same record',
+      r1 != null && pack.get(r1.slug) === r1);
+    ok('cells: ico-0001 sits at row 0 col 0; ico-0010 at row 1 col 1',
+      r1.row === 0 && r1.col === 0
+      && pack.get('ico-0010').row === 1 && pack.get('ico-0010').col === 1);
+    // the window is inset half a source texel so a bilinear sample at the edge
+    // can never reach into the neighbouring cell
+    const E = 0.5 / 1024;
+    const vA = pack.view('ico-0001');
+    const vB = pack.view('ico-0010');
+    ok('views: the cell window is exact and half-texel inset (r1c1)',
+      Math.abs(vB.offset.x - (0.125 + E)) < 1e-9 && Math.abs(vB.offset.y - (0.75 + E)) < 1e-9
+      && Math.abs(vB.repeat.x - (0.125 - E * 2)) < 1e-9);
+    ok('views: clones share ONE upload per sheet (same .source, distinct textures)',
+      vA !== vB && vA.source === vB.source);
+    const count0 = engine.textures.count;
+    const vC = pack.view('ico-0100');
+    ok('budget: the whole vault costs ZERO atlas entries', engine.textures.count === count0 && vC !== null);
+    vA.dispose(); vB.dispose(); vC.dispose();
+
+    // filters drive the real pipeline
+    search.setValue('ember', { silent: false });
+    await wait(80);
+    ok('filter: searching "ember" narrows the shelf and every hit matches',
+      filtered.length > 0 && filtered.length < 3840
+      && filtered.every((r) => r.slug.includes('ember') || r.name.toLowerCase().includes('ember')
+        || r.type.includes('ember') || r.tags.some((t) => t.includes('ember'))));
+    search.setValue('', { silent: false });
+    catSelect.setValue('weapons', { silent: false });
+    await wait(80);
+    ok('filter: the weapons category holds exactly its four sheets (256 icons)',
+      filtered.length === 256 && filtered.every((r) => r.category === 'weapons'));
+    // scrollToIndex(0)'s EFFECT, pinned: applyFilter calls it on every change and
+    // nothing ever read the result — scroll the shelf away first, and the next
+    // filter change must rewind it to the top
+    list.scrollToIndex(20);
+    const scrolled = list.content.scrollY;
+    catSelect.setValue('All categories', { silent: false });
+    await wait(80);
+    ok('filter: a filter change rewinds the shelf to the top',
+      scrolled > 0 && list.content.scrollY === 0);
+
+    // the copy affordance leaves a probe
+    select(pack.get('ico-0002'));
+    copyId.dispatch('click', {});
+    ok('copy: the id lands in the probe', window.__copied === 'ico-0002');
+
+    // the crosshair: the selection lights its COLUMN as well as
+    // its row, and the wash re-seats when a filter re-flows the grid
+    const ci137 = filtered.indexOf(selected);
+    ok('crosshair: the selected column wears the wash the full height of the shelf',
+      colWash.visible === true && colWash.x === (ci137 % perRow) * PITCH
+      && colWash.w === TILE && colWash.h >= list.items.length * PITCH);
+    search.setValue('sig', { silent: false }); // a narrower shelf: the selected icon re-flows or leaves
+    await wait(120);
+    ok('crosshair: a re-flowed grid re-seats the wash exactly, or hides it when the selection filtered out',
+      filtered.indexOf(selected) === -1
+        ? colWash.visible === false
+        : (colWash.visible === true
+           && colWash.x === (filtered.indexOf(selected) % perRow) * PITCH));
+    search.setValue('', { silent: false });
+    await wait(120);
+
+    // the keyboard model: ONE tab stop, arrows in TWO dimensions, Enter opens —
+    // driven through the REAL key plane (canvas focus + real KeyboardEvents, the
+    // action-hud idiom). list.dispatch('keydown', ...) bypasses focus routing
+    // entirely, so it stayed green even when a focused list could not hear a key.
+    engine.focus.set(list, 'api');
+    engine.canvas.focus();
+    await wait(60);
+    const realKey = (key) => engine.canvas.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+    const startRec = cursorRec();
+    realKey('ArrowRight');
+    await wait(40);
+    const rightRec = cursorRec();
+    realKey('ArrowDown');
+    await wait(40);
+    const downRec = cursorRec();
+    ok(`keyboard: the list is ONE focus stop and real arrows walk the cursor both axes`
+      + ` [start=${startRec && startRec.id} right=${rightRec && rightRec.id} down=${downRec && downRec.id} ring=${cursor.visible}]`,
+      list.focusable === true && startRec != null
+      && rightRec != null && rightRec !== startRec
+      && downRec != null && downRec !== rightRec && cursor.visible === true);
+    realKey('Enter');
+    await wait(40);
+    ok('keyboard: a real Enter opens the CURSOR tile, not the row head', selected === downRec);
+
+    // shelf memory: browsing does not accumulate sixty uploads
+    await pack.ensure(pack.sheets.slice(0, 12).map((s) => s.id));
+    pack.sheets.slice(0, 12).forEach((s) => touchSheet(s.id));
+    trimShelves();
+    ok(`shelves: the trim bounds live sheets to ${MAX_LIVE_SHEETS} [${pack.stats().sheetsLoaded}]`,
+      pack.stats().sheetsLoaded <= MAX_LIVE_SHEETS);
+
+    // hit-reach: the REAL probe answers for the rail controls and a live tile
+    const reach = (n) => {
+      const h = hitTest(engine, n.worldX + n.w / 2, n.worldY + n.h / 2);
+      return h === n || (n.isAncestorOf ? n.isAncestorOf(h) : false);
+    };
+    const reachName = (n) => {
+      const h = hitTest(engine, n.worldX + n.w / 2, n.worldY + n.h / 2);
+      return h ? (h.name || h.constructor.name) : 'null';
+    };
+    // the pooled rows are ordinary children of the list's content — no `_pool`
+    // read (made the pool's SIZE public as poolSize; the rows themselves
+ // were always reachable through the tree)
+    const firstTile = list.content.children.filter((n) => n.visible)
+      .flatMap((n) => n._tiles ?? []).find((t) => t.visible && t._rec);
+    ok(`hit-reach: search, the selects, Copy id, and a live tile all answer`
+      + ` [s=${reach(search)} c=${reach(catSelect)}:${reachName(catSelect)} sh=${reach(sheetSelect)}:${reachName(sheetSelect)}`
+      + ` cp=${reach(copyId)}:${reachName(copyId)}@${Math.round(copyId.worldX)},${Math.round(copyId.worldY)} tile=${firstTile != null && reach(firstTile)}:${firstTile ? reachName(firstTile) : 'none'}]`,
+      reach(search) && reach(catSelect) && reach(sheetSelect) && reach(copyId)
+      && firstTile != null && reach(firstTile));
+    ok(`chrome: the rail is a framed panel the layout engine stacks, not a hand-placed lane`
+      + ` [bg=${!!rail.bg} order=${railHead.y}<${search.y}<${catSelect.y}<${sheetSelect.y}]`,
+      rail.bg != null && railHead.y < search.y && search.y < catSelect.y
+      && catSelect.y < sheetSelect.y && sheetSelect.y < detail.y);
+
+    // a shelf that cannot load refuses QUIETLY through the shared streaming path:
+    // no unhandled rejection reaches __errs (the optional-pack law), and the
+    // pending slot un-strands so a later scroll can retry. Killing streamShelf's
+    // .catch turns this red twice — here and at the final errs gate.
+    const errs0 = window.__errs.length;
+    const refusal583 = streamShelf(-1);
+    await refusal583;
+    await new Promise((r) => setTimeout(r, 60)); // a stray rejection would have landed by now
+    // the precondition the juice suite already knew: with no pack
+    // loaded, streamShelf returns null before the catch ever arms and the old
+    // arm passed VACUOUSLY — the assert now demands the path actually ran
+    ok('pack: a missing shelf refuses quietly and un-strands its pending slot (the catch RAN: pack live, a real promise returned)',
+      pack != null && refusal583 !== null
+      && !pendingSheets.has(-1) && window.__errs.length === errs0);
+
+    // the registry path: a probe icon bakes into icon.* and survives a re-boot
+    const res = await Eldritch.loadIcons({ base: '../assets/icons', icons: [{ id: 'ico-0001', as: 'vault-probe' }] });
+    const baked = engine.textures.get('icon.vault-probe');
+    ok('registry: loadIcons bakes the probe under icon.* (distinct from the unknown plate)',
+      res.registered.includes('vault-probe') && res.missing.length === 0
+      && baked !== engine.textures.get('__unknown'));
+    Eldritch.destroy();
+    Eldritch.init({ background: false, vignette: false, timerDriven: true });
+    ok('registry: the pack icon persists across destroy/init (the _customIcons contract)',
+      Eldritch.engine.textures.canvases.has('icon.vault-probe'));
+
+    // the ground circle: the vault floor answers the right-click
+    engine.bus.emit('pointerdown', { x: 900, y: 640, button: 2, pointerId: 68, target: null, native: null });
+    await wait(60);
+    ok('ground: a right-click on the vault floor opens the wheel',
+      window.__vault.ground().isOpen === true);
+    window.__vault.ground().close({ silent: true });
+    await wait(40);
+
+    // the boot-health hooks are part of the contract: a suite that went green while
+    // an error rode the title would be measuring the wrong thing
+    ok('the suite ends error-free (boot, filters, keys, trim, re-boot)', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;max-height:95vh;overflow:auto;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:10px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `ICONBROWSER ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Lattices of Fate</title>
+<!-- @demo   Lattices of Fate: three disciplines on one chapter wall — a binder spends insight point by point, tier by tier, toward three separate ruins.
+     @shows  Eldritch, TalentPanes, RadialMenu, EldPopup, EldTooltip, UINode, QuadNode, TextNode, runAudit, hitTest, COLORS, FONTS
+     @params ?freeze=1 — bit-stable snapshot boot; ?assert=1 — the in-page suite titles its own PASS count -->
+
+<!-- rebuild. The page ran one 22-rite dataset through three READINGS
+     (SkillTree tiers, TechTree eras, a raw chart) behind a SegmentedControl — and the
+     verdict on the whole family was "the tree logic is totally bugged; it makes
+     no sense what clicking things does." The graph skins died with that verdict. This
+     page is the WoW-Classic law now: THREE disciplines side by side over ONE unspent
+     pool, fixed tier grids with golden prerequisite arrows, ranks that climb n/m under
+     the pointer, a LEFT click that always means "learn one rank", a RIGHT click that
+     always means "unlearn one" (refused with the error voice when the build forbids
+     it), tiers that open at five points spent in that tree, and tooltips whose red
+     lines answer "why not" — one meaning per gesture, everywhere on the wall. The
+     reading cards fell with the readings: the lore lives in the tooltips, where a
+     talent screen keeps it. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {
+  Eldritch, TalentPanes, RadialMenu, EldPopup, EldTooltip, UINode, QuadNode, TextNode,
+  runAudit, hitTest, COLORS, FONTS,
+} from '../src/lovecraft-ui.js';
+
+const Q = new URLSearchParams(location.search);
+const FROZEN = Q.has('freeze');
+const ASSERT = Q.has('assert');
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+window.engine = engine;
+
+const SHADOW = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+
+// ---- the frame: the whole width belongs to the wall now ----
+// The reading column died with the readings it read: a talent screen keeps
+// its lore in tooltips, and three full disciplines USE the thirds that used to
+// stand empty. TOP leaves the legend strip its lane.
+const M = 24, TOP = 126;
+function geom() {
+  const W = Math.round(engine.width), H = Math.round(engine.height);
+  return { W, H, fx: M, fy: TOP, fw: Math.max(260, W - M * 2), fh: Math.max(220, H - TOP - M) };
+}
+
+// ---- the binding chamber: ONE page-owned canvas, registry-free ----
+const chamber = new UINode({ name: 'binding-chamber' });
+const wCanvas = document.createElement('canvas');
+const wTex = new THREE.CanvasTexture(wCanvas);
+wTex.colorSpace = THREE.SRGBColorSpace;
+wTex.minFilter = THREE.LinearFilter;
+wTex.magFilter = THREE.LinearFilter;
+wTex.generateMipmaps = false;
+const wQuad = new QuadNode({ texture: wTex });
+chamber.add(wQuad);
+engine.layers.background.add(chamber);
+chamber.on('dispose', () => wTex.dispose());
+const srnd = (n) => { let s = n; return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff; };
+
+function paintChamber() {
+  const g = geom();
+  const W = Math.max(2, g.W), H = Math.max(2, g.H);
+  if (wCanvas.width !== W || wCanvas.height !== H) { wCanvas.width = W; wCanvas.height = H; }
+  const ctx = wCanvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  // coursed ashlar, seeded for bit-stability. Value stays FLAT and near the
+  // background - per-stone RGB jitter reads as a 90s tiling texture, not a dark room.
+  const r = srnd(4231);
+  const CH = 46;
+  ctx.fillStyle = '#101413';
+  ctx.fillRect(0, 0, W, H);
+  for (let row = 0, y = -8; y < H; row++, y += CH) {
+    const off = (row % 2) * 66;
+    for (let x = -66 + off; x < W + 66; x += 132) {
+      ctx.fillStyle = 'rgba(0,0,0,0.42)';
+      ctx.fillRect(x, y, 132, CH);
+      ctx.fillStyle = `rgba(23,29,27,${0.86 + r() * 0.14})`;
+      ctx.fillRect(x + 3, y + 3, 126, CH - 6);
+      ctx.strokeStyle = 'rgba(72,84,76,0.12)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x + 3, y + 3.5); ctx.lineTo(x + 129, y + 3.5); ctx.stroke();
+    }
+  }
+
+  // the incised star-wheel the chapter was cut around, centred on the field
+  const wx = g.fx + g.fw / 2, wy = g.fy + g.fh / 2;
+  const R = Math.min(g.fw, g.fh) * 0.46;
+  ctx.save();
+  ctx.translate(wx, wy);
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.lineWidth = 5;
+  for (const k of [1, 0.74, 0.46, 0.2]) { ctx.beginPath(); ctx.arc(0, 0, R * k, 0, Math.PI * 2); ctx.stroke(); }
+  ctx.strokeStyle = 'rgba(106,124,110,0.20)';
+  ctx.lineWidth = 1.5;
+  for (const k of [1, 0.74, 0.46, 0.2]) { ctx.beginPath(); ctx.arc(0, 0, R * k - 2, 0, Math.PI * 2); ctx.stroke(); }
+  for (let i = 0; i < 12; i++) {
+    const a = (i / 12) * Math.PI * 2;
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(Math.cos(a) * R * 0.2, Math.sin(a) * R * 0.2);
+    ctx.lineTo(Math.cos(a) * R, Math.sin(a) * R); ctx.stroke();
+    ctx.strokeStyle = 'rgba(106,124,110,0.13)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(Math.cos(a) * R * 0.2, Math.sin(a) * R * 0.2);
+    ctx.lineTo(Math.cos(a) * R, Math.sin(a) * R); ctx.stroke();
+  }
+  // the elder sign at the hub: one unbroken five-point stroke
+  ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 5;
+  ctx.beginPath();
+  for (let i = 0; i <= 5; i++) {
+    const a = -Math.PI / 2 + (i * 4 * Math.PI) / 5;
+    const px = Math.cos(a) * R * 0.19, py = Math.sin(a) * R * 0.19;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(118,196,148,0.17)'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.restore();
+
+  // the field groove: the wall is CUT here, so the plates sit in shadow. No panel
+  // frame - an opaque panel would bury everything painted above. The wash is kept
+  // SHALLOW: at 0.42 it swallowed the star-wheel and the courses and the field read
+  // as a black hole with plates floating in it (measured on the first shot).
+  ctx.fillStyle = 'rgba(2,5,4,0.26)';
+  ctx.fillRect(g.fx, g.fy, g.fw, g.fh);
+  ctx.strokeStyle = 'rgba(0,0,0,0.75)'; ctx.lineWidth = 3;
+  ctx.strokeRect(g.fx + 1.5, g.fy + 1.5, g.fw - 3, g.fh - 3);
+  ctx.strokeStyle = 'rgba(104,120,108,0.16)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(g.fx + 3.5, g.fy + g.fh - 3.5); ctx.lineTo(g.fx + 3.5, g.fy + 3.5);
+  ctx.lineTo(g.fx + g.fw - 3.5, g.fy + 3.5);
+  ctx.stroke();
+
+  // chalk: tally marks and a working constellation, left by whoever read this last
+  const c = srnd(9091);
+  ctx.strokeStyle = 'rgba(206,214,198,0.13)';
+  ctx.lineWidth = 2; ctx.lineCap = 'round';
+  for (let i = 0; i < 5; i++) {
+    const bx = g.fx + 16 + i * 13, by = g.fy + g.fh + 8;
+    if (by + 16 > H) break;
+    ctx.beginPath();
+    if (i === 4) { ctx.moveTo(bx - 42, by + 14); ctx.lineTo(bx + 4, by); }
+    else { ctx.moveTo(bx, by); ctx.lineTo(bx - 3, by + 14); }
+    ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(206,214,198,0.10)';
+  let px = M + 10, py = 66;
+  for (let i = 0; i < 7; i++) {
+    const nx = px + 18 + c() * 26, ny = 60 + c() * 22;
+    if (nx > g.fx + g.fw - 40) break;
+    ctx.beginPath(); ctx.arc(nx, ny, 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(206,214,198,0.06)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(nx, ny); ctx.stroke();
+    px = nx; py = ny;
+  }
+
+  // the lantern on the ledge, upper left: the only warm thing in the room
+  const lx = Math.round(W * 0.11), ly = Math.round(H * 0.22);
+  const pool = ctx.createRadialGradient(lx, ly, 10, lx, ly, Math.max(W, H) * 0.52);
+  pool.addColorStop(0, 'rgba(232,216,106,0.17)');
+  pool.addColorStop(0.45, 'rgba(232,216,106,0.055)');
+  pool.addColorStop(1, 'rgba(232,216,106,0)');
+  ctx.fillStyle = pool;
+  ctx.fillRect(0, 0, W, H);
+
+  // the plinth ledge the whole wall stands on
+  const py2 = H - 14;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, py2, W, 14);
+  ctx.strokeStyle = 'rgba(96,110,100,0.14)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, py2 + 0.5); ctx.lineTo(W, py2 + 0.5); ctx.stroke();
+
+  wTex.needsUpdate = true;
+}
+// ZERO-SIZED wrapper: a sized full-screen node beside the panes overlaps
+// everything in the audit's containment/overlap census.
+chamber.onLayout = function () {
+  wQuad.setRect(0, 0, Math.round(engine.width), Math.round(engine.height));
+  paintChamber();
+};
+
+// ---- the chapter: three disciplines, twenty-seven talents ----
+// The old page's LORE table lives INSIDE the data now — names and lines ride the
+// tooltip, which is where a talent screen keeps its fiction. Plates in one
+// discipline share an icon family on purpose: the wall reads as bloodlines.
+const WARD = { name: 'The Ward', talents: [
+  { id: 'ward', icon: 'shield', tier: 1, col: 1, maxRank: 5, name: 'Elder Ward',
+    rankDesc: ['The sign holds one heartbeat.', 'The sign holds two heartbeats.', 'Three heartbeats.', 'Four heartbeats.', 'The sign holds as long as your arm does.'] },
+  { id: 'moss', icon: 'leafs', tier: 1, col: 0, maxRank: 3, name: 'Grave Moss', desc: 'It grows on whatever the ward already saved. Chew it and the cold backs off.' },
+  { id: 'scales', icon: 'shield', tier: 2, col: 1, maxRank: 3, requires: 'ward', name: 'Scaled Ward', desc: 'The sign, layered. Each plate takes a blow the one beneath it could not.' },
+  { id: 'drown', icon: 'leafs', tier: 2, col: 0, maxRank: 2, requires: 'moss', name: 'Drowned Green', desc: 'The moss, fed saltwater. It heals, and it remembers the tide.' },
+  { id: 'brine', icon: 'leafs', tier: 2, col: 2, maxRank: 2, name: 'Brine Skin', desc: 'Salt in the pores. The cold forgets your name.' },
+  { id: 'bulwark', icon: 'shield', tier: 3, col: 1, maxRank: 2, requires: 'scales', name: 'Bulwark of Scales', desc: 'The sign made stone. Nothing has come through one yet.' },
+  { id: 'vigil', icon: 'shield', tier: 3, col: 2, maxRank: 3, name: 'The Long Vigil', desc: 'Sleep is a door. This rite nails it shut for one night at a time.' },
+  { id: 'saltring', icon: 'shield', tier: 2, col: 3, maxRank: 2, requires: 'brine', name: 'Ring of Salt', desc: 'Poured unbroken. What walks the beach walks around you now.' },
+  { id: 'stand', icon: 'shield', tier: 3, col: 3, maxRank: 3, requires: 'saltring', name: 'The Last Stand', desc: 'The ring, held while everything outside it insists.' },
+  { id: 'tide', icon: 'leafs', tier: 4, col: 0, maxRank: 2, requires: 'drown', name: 'The Answering Tide', desc: 'The green calls the water, and the water comes uphill to answer.' },
+  { id: 'aegis', icon: 'shield', tier: 4, col: 1, maxRank: 2, requires: 'bulwark', name: 'Drowned Aegis', desc: 'A shield recovered from a wreck that never happened. It remembers sinking.' },
+  { id: 'maelstrom', icon: 'fireball', tier: 5, col: 0, maxRank: 1, requires: 'tide', name: 'Balefire Maelstrom', desc: 'Saltwater and bone darts, spun together until they catch.' },
+  { id: 'monolith', icon: 'shield', tier: 5, col: 1, maxRank: 1, requires: 'aegis', name: 'The Standing Stone', desc: 'You stop being a person holding a shield. You become the place the sea gave up.' },
+] };
+const BLADE = { name: 'The Blade', talents: [
+  { id: 'blade', icon: 'sword', tier: 1, col: 1, maxRank: 5, name: 'Ritual Blade', desc: 'Ground thin on a whetstone that used to be a step.' },
+  { id: 'barbs', icon: 'arrows', tier: 1, col: 2, maxRank: 3, name: 'Barbed Volley', desc: 'Bone darts, fletched with something that has not finished twitching.' },
+  { id: 'feint', icon: 'sword', tier: 2, col: 0, maxRank: 2, name: 'The Feint', desc: 'The blade goes where the eye was told it would not.' },
+  { id: 'edge', icon: 'sword', tier: 2, col: 1, maxRank: 3, requires: 'blade', name: 'Whetted Edge', desc: 'The blade remembers every throat. It sharpens itself now, quietly.' },
+  { id: 'volley', icon: 'arrows', tier: 2, col: 2, maxRank: 2, requires: 'barbs', name: 'Iron Rain', desc: 'Every dart in the quiver at once, and the quiver fills again.' },
+  { id: 'kiss', icon: 'deathkiss', tier: 3, col: 1, maxRank: 2, requires: 'edge', name: "Death's Kiss", desc: 'You have to see the ending clearly before you can put it in a mouth.' },
+  { id: 'rend', icon: 'sword', tier: 3, col: 2, maxRank: 3, name: 'The Rending', desc: 'Not a cut. A separation of a thing from the shape it was keeping.' },
+  { id: 'twin', icon: 'sword', tier: 3, col: 0, maxRank: 2, requires: 'feint', name: 'The Twin', desc: 'The feint, taught to a second blade. Neither of them is the real one.' },
+  { id: 'reap', icon: 'deathkiss', tier: 4, col: 1, maxRank: 2, requires: 'kiss', name: 'The Reaping', desc: 'The kiss, given to a room instead of to a mouth.' },
+  { id: 'silence', icon: 'sword', tier: 4, col: 0, maxRank: 2, requires: 'twin', name: 'The Silence', desc: 'The room after the twins have finished. Nothing in it says anything.' },
+  { id: 'storm', icon: 'arrows', tier: 4, col: 2, maxRank: 3, requires: 'rend', name: 'Dart Storm', desc: 'The rending, fletched. It arrives from every direction that exists.' },
+  { id: 'ruin', icon: 'fireball2', tier: 5, col: 1, maxRank: 1, requires: 'reap', name: 'RUIN', desc: 'The last page of the chapter. It is not a spell. It is a decision.' },
+  { id: 'redharvest', icon: 'deathkiss', tier: 5, col: 2, maxRank: 1, requires: 'storm', name: 'Red Harvest', desc: 'The storm, kept. What it gathers, you get to keep too.' },
+] };
+const GAZE = { name: 'The Gaze', talents: [
+  { id: 'gaze', icon: 'blindinglight', tier: 1, col: 1, maxRank: 5, name: 'Blinding Radiance', desc: 'You open the eye that was always there. It does not close well.' },
+  { id: 'candle', icon: 'book', tier: 1, col: 0, maxRank: 2, name: 'The Black Candle', desc: 'It burns downward. The light pools instead of rising.' },
+  { id: 'litany', icon: 'book', tier: 1, col: 2, maxRank: 3, name: 'The Litany', desc: 'Nine words in the wrong order. Said correctly, the walls listen.' },
+  { id: 'sight', icon: 'blindinglight', tier: 2, col: 1, maxRank: 3, requires: 'gaze', name: 'The Lidless Watch', desc: 'You see the room as it will be in a moment. Only ever a moment.' },
+  { id: 'augury', icon: 'book', tier: 2, col: 2, maxRank: 2, requires: 'litany', name: 'The Augury', desc: 'Read the litany backward and tomorrow answers, resentfully.' },
+  { id: 'archive', icon: 'book', tier: 3, col: 0, maxRank: 3, name: 'The Black Archive', desc: 'Every page anyone ever burned, filed under where it landed.' },
+  { id: 'witness', icon: 'blindinglight', tier: 3, col: 1, maxRank: 2, requires: 'sight', name: 'The Witness', desc: 'You stop looking. It looks instead, and tells you what it saw.' },
+  { id: 'mirror', icon: 'blindinglight', tier: 2, col: 0, maxRank: 2, requires: 'candle', name: 'The Dark Mirror', desc: 'The candle, reflected. The reflection burns upward, the way fire should.' },
+  { id: 'chorus', icon: 'book', tier: 3, col: 2, maxRank: 3, requires: 'augury', name: 'The Whispering Chorus', desc: 'Tomorrow, answered by many mouths at once. They do not quite agree.' },
+  { id: 'omen', icon: 'book', tier: 4, col: 0, maxRank: 2, requires: 'archive', name: 'The Deep Omen', desc: 'The archive, read forward for once. It ends mid-sentence.' },
+  { id: 'unveiling', icon: 'book', tier: 4, col: 2, maxRank: 2, requires: 'chorus', name: 'The Unveiling', desc: 'The chorus, harmonized. For one held breath they say the same word.' },
+  { id: 'lidless', icon: 'blindinglight', tier: 5, col: 1, maxRank: 1, requires: 'omen', name: 'The Lidless God', desc: 'The eye, opened all the way. There is no chapter after this one.' },
+  { id: 'names', icon: 'book', tier: 5, col: 2, maxRank: 1, requires: 'unveiling', name: 'The Book of Names', desc: 'The word the chorus held. Written down, it stops being a word.' },
+] };
+
+// ---- the wall: three disciplines around ONE pool of insight ----
+const panes = new TalentPanes({
+ points: 75, //: enough insight to walk several branches deep and SEE the laws work
+ panes: [{ id: 'ward', data: WARD }, { id: 'blade', data: BLADE }, { id: 'gaze', data: GAZE }],
+});
+engine.layers.background.add(panes);
+
+// ---- the chrome ----
+const header = new TextNode('Lattices of Fate', {
+  font: FONTS.header, size: 24, smallCaps: true, letterSpacing: 2,
+  color: COLORS.accent, shadow: SHADOW,
+});
+// STYLE 1a.1: the caption names the VERBS, because the old wall left it unclear
+// what clicking anything would do.
+const caption = new TextNode(
+  'Left-click learns a rank. Right-click unlearns one. Each tier opens at five points spent in that discipline; an arrow turns gold when its rite is mastered.',
+  { size: 12, color: COLORS.textFaint, shadow: SHADOW, maxWidth: 860, ellipsis: true });
+engine.layers.background.add(header, caption);
+
+// The legend, four fates now (the gilt joined at). The swatches are the real
+// plate textures, named — a player could not tell locked from open from taken.
+const legendTitle = new TextNode('Plate states', { size: 11, color: COLORS.textFaint, shadow: SHADOW });
+const LEGEND = [
+  ['locked', 'Sealed'],
+  ['available', 'Open — click to learn'],
+  ['owned', 'Invested'],
+  ['maxed', 'Mastered'],
+].map(([state, label]) => ({
+  swatch: new QuadNode({ texture: engine.textures.get(`graphnode.${state}`) }),
+  text: new TextNode(label, { size: 11, color: COLORS.textMuted, shadow: SHADOW }),
+}));
+engine.layers.background.add(legendTitle, ...LEGEND.flatMap((l) => [l.swatch, l.text]));
+
+const chrome = new UINode({ name: 'trees-chrome' });
+engine.layers.background.add(chrome);
+chrome.onLayout = function () {
+  const g = geom();
+  header.setPos(M + 4, 20);
+  caption.setMaxWidth(Math.max(120, g.fw - 8));
+  caption.setPos(M + 4, 56);
+  const SW = 24;
+  legendTitle.setPos(M + 4, 80);
+  let lx = M + 4 + legendTitle.w + 14;
+  for (const l of LEGEND) {
+    l.swatch.setRect(lx, 76, SW, SW);
+    l.text.setPos(lx + SW + 6, 76 + Math.round((SW - l.text.h) / 2));
+    lx += SW + 6 + l.text.w + 22;
+  }
+  panes.setPos(
+    g.fx + Math.max(0, Math.round((g.fw - panes.w) / 2)),
+    g.fy + Math.max(6, Math.round((g.fh - panes.h) / 2)));
+};
+
+window.treesApi = {
+  panes,
+  pane: (id) => panes.pane(id),
+  get points() { return panes.points; },
+  get spent() { return panes.getSpent(); },
+  ranks: () => panes.serialize().ranks,
+};
+
+// ---- the ground circle: right-click on the wall opens the wheel —
+// the binder's own errands: the guarded Reset, and a grant of insight to play with.
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'talents', label: 'Talents', children: [
+ { id: 'reset', label: 'Reset Talents…' },
+ { id: 'grant', label: 'Grant 5 Insight' },
+ ] },
+ ],
+});
+ground.on('select', ({ id, path }) => {
+  if (path[0] !== 'talents') return;
+  if (id === 'reset') panes.reset();
+  else if (id === 'grant') panes.setPoints(panes.points + 5, { silent: false });
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+window.treesApi.ground = ground;
+
+// ---- the icon pack: the RE-SKIN idiom ----
+// `as:` points at the icon ids the chapter ALREADY carries, so the registry re-bakes
+// those names in place: every plate on the live wall follows on its own - the model is
+// untouched and nothing re-mounts - and the atlas budget never moves. All NINE ability
+// painters are used by the chapter, so all nine are re-skinned. `fallback: 'none'`
+// leaves the procedural art standing when the assets folder is absent.
+const PACK_SAGA = [
+  { id: 'ico-3649', as: 'book' },          // Ancient Grimoire (candle, litany, augury, archive, omen)
+  { id: 'ico-0210', as: 'shield' },        // Iron Bulwark (ward, scales, bulwark, vigil)
+  { id: 'ico-0513', as: 'sword' },         // Ironbound Longsword (blade, feint, edge, rend)
+  { id: 'ico-0489', as: 'blindinglight' }, // Aetheric Eye (gaze, sight, witness, lidless)
+  { id: 'ico-0707', as: 'arrows' },        // Bonecast Shortbow (barbs, volley)
+  { id: 'ico-0307', as: 'leafs' },         // Bloodbloom Remedy (moss, drown, brine, tide)
+  { id: 'ico-0394', as: 'deathkiss' },     // Marrow Cage (kiss, reap)
+  { id: 'ico-0017', as: 'fireball' },      // Ember Bloom (maelstrom)
+  { id: 'ico-0078', as: 'fireball2' },     // Blackwater Breaker (ruin)
+];
+const packReady = FROZEN
+  ? Promise.resolve({ registered: [], missing: ['(frozen: procedural baseline)'] })
+  : Eldritch.loadIcons({ base: '../assets/icons', fallback: 'none', icons: PACK_SAGA });
+
+// ---- ?assert=1: the in-page suite (ad hoc; the manifest gate uses READY) ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const pev = (type, x, y, extra = {}) => {
+    engine.canvas.dispatchEvent(new PointerEvent(type, {
+      clientX: x, clientY: y, button: 0, buttons: type === 'pointerup' ? 0 : 1,
+      pointerId: 1, bubbles: true, isPrimary: true, ...extra,
+    }));
+  };
+  (async () => {
+    try {
+    // the pack lands first: the suite is the instrument that CAN await it
+    const packRes = await packReady;
+    await wait(1200);
+
+    const sciWard = panes.pane('ward');
+    const wardPlate = sciWard._plates.get('ward');
+
+    // the re-skin lands under the ids the wall already carries: the proof is
+    // material IDENTITY on a live plate's sigil (registry presence only proves
+    // a bake happened, not that the wall shows it)
+    ok(`the icon pack re-skins the wall in place [${packRes.registered.join(',') || 'none'}${packRes.missing.length ? ' missing:' + packRes.missing.join(',') : ''}]`,
+      packRes.missing.length === 0
+      && packRes.registered.length === PACK_SAGA.length
+      && engine.textures.canvases.has('icon.shield')
+      && wardPlate.icon.material.map === engine.textures.get('icon.shield'));
+
+    ok('the wall mounts three disciplines of thirteen — thirty-nine plates on one pool',
+      panes.pane('ward')._plates.size === 13 && panes.pane('blade')._plates.size === 13
+      && panes.pane('gaze')._plates.size === 13 && panes.points === 75
+      && panes.unspentText._text === Eldritch.strings.talentUnspent.replace('{0}', '75'));
+
+    ok('every sealed tier states its price on the rail at boot',
+      sciWard._rails.length === 4 && sciWard._rails.every((r) => r.visible === true));
+
+    // "the path a pointer takes" must first prove a pointer can take it
+    const wardHit = hitTest(engine, wardPlate.worldX + wardPlate.w / 2, wardPlate.worldY + wardPlate.h / 2);
+    ok('hit-reach: the ward plate answers the real hit probe',
+      wardHit != null && (wardHit === wardPlate || wardPlate.isAncestorOf(wardHit)));
+
+    // the canonical spend rides a REAL pointer
+    const spends = [];
+    panes.on('spend', (e) => { if (e.tree) spends.push(e); });
+    pev('pointerdown', wardPlate.worldX + 24, wardPlate.worldY + 24);
+    await wait(30);
+    pev('pointerup', wardPlate.worldX + 24, wardPlate.worldY + 24);
+    await wait(60);
+    ok('a REAL left click learns one rank and drains the shared pool',
+      spends.length === 1 && spends[0].tree === 'ward' && spends[0].id === 'ward'
+      && sciWard.getRank('ward') === 1 && panes.points === 74);
+
+    for (let i = 0; i < 4; i++) wardPlate.dispatch('click', {});
+    ok('ranks climb to 5/5 and the plate wears the gilt',
+      sciWard.getState('ward') === 'maxed'
+      && wardPlate.bg.material.map === engine.textures.get('graphnode.maxed')
+      && wardPlate.badge._text === '5/5' && panes.points === 70);
+
+    // the NEW branches: the elbow chain brine→saltring
+    // proves the prereq law on a branch that crosses columns, and the second
+    // capstone proves the deep gate — then the episode restores the board
+    ok('a new branch boots sealed both ways: saltring wants its prereq MAXED, the capstone wants twenty below',
+      sciWard.getState('saltring') === 'locked-prereq'
+      && sciWard.getState('monolith') === 'locked-tier');
+    sciWard._plates.get('brine').dispatch('click', {});
+    sciWard._plates.get('brine').dispatch('click', {});
+    ok('maxing brine opens the cross-column branch (the elbow arrow turns gold)',
+      sciWard.getState('brine') === 'maxed' && sciWard.getState('saltring') === 'available'
+      && panes.points === 68);
+    sciWard._plates.get('brine').dispatch('rightclick', { x: 0, y: 0 });
+    sciWard._plates.get('brine').dispatch('rightclick', { x: 0, y: 0 });
+    ok('the branch episode restores the board — brine refunds whole, the pool returns',
+      sciWard.getRank('brine') === 0 && sciWard.getState('saltring') === 'locked-prereq'
+      && panes.points === 70);
+
+    ok('five points open tier 2 IN THIS TREE ONLY — the gates are per discipline',
+      sciWard.getState('scales') === 'available'
+      && panes.pane('blade').getState('edge') === 'locked-tier');
+
+    const rev0 = sciWard._arrowRevision;
+    sciWard._plates.get('scales').dispatch('click', {});
+    ok('learning re-inks the arrows (the maxed prerequisite turns them gold)',
+      sciWard.getRank('scales') === 1 && sciWard._arrowRevision > rev0);
+
+    ok('the refund oracle binds the prerequisite: ward cannot unlearn under a ranked dependent',
+      sciWard.canRefund('ward') === false && sciWard.canRefund('scales') === true);
+
+    // the refusal CONSUMES too: while scales holds a rank, a right-click on ward
+    // refuses with the error voice, keeps every rank, and still claims the gesture
+    const evPlate = wardPlate.dispatch('rightclick', { x: 0, y: 0 });
+    ok('a bound talent refuses to unlearn and the grid still consumes the gesture',
+      evPlate.defaultPrevented === true && sciWard.getRank('ward') === 5);
+
+    // the canonical refund rides a REAL right-click — and the grid CONSUMES it
+    const scalesPlate = sciWard._plates.get('scales');
+    pev('pointerdown', scalesPlate.worldX + 24, scalesPlate.worldY + 24, { button: 2, buttons: 2 });
+    await wait(30);
+    pev('pointerup', scalesPlate.worldX + 24, scalesPlate.worldY + 24, { button: 2, buttons: 0 });
+    await wait(60);
+    ok('a REAL right click unlearns one rank, refunds the pool, and opens NO wheel',
+      sciWard.getRank('scales') === 0 && panes.points === 70
+      && ground.isOpen === false && (engine.radialShared?.isOpen ?? false) === false);
+
+    // the refund verb on the keyboard: re-learn scales, then a REAL window Minus
+    // on the FOCUSED plate rides the same oracle and credits the pool
+    sciWard._plates.get('scales').dispatch('click', {});
+    engine.focus.set(scalesPlate, 'key');
+    engine.canvas.focus({ preventScroll: true });
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '-', cancelable: true, bubbles: true }));
+    await wait(60);
+    ok('Minus on the focused plate unlearns one rank and credits the pool (the keyboard refund)',
+      sciWard.getRank('scales') === 0 && panes.points === 70);
+    const evDel = scalesPlate.dispatch('keydown', { key: 'Delete', code: 'Delete' });
+    ok('Delete refuses an empty plate through the same oracle and is still consumed',
+      evDel.defaultPrevented === true && sciWard.getRank('scales') === 0 && panes.points === 70);
+    engine.setFocus(null);
+
+    const pool0 = panes.points;
+    panes.setPoints(0);
+    sciWard._plates.get('brine').dispatch('click', {});
+    ok('an empty pool refuses an open plate with the error voice, nothing else',
+      sciWard.getRank('brine') === 0 && panes.getSpent() === 5);
+    panes.setPoints(pool0);
+
+    const tipLid = panes.pane('gaze')._tooltipOf(panes.pane('gaze')._byId.get('lidless'));
+    ok('a deep talent explains itself in red — the tier line and the prerequisite line',
+      tipLid.lines.filter((l) => l.color === COLORS.negative).length >= 2);
+
+    ok('the discipline footer sums its own points',
+      sciWard._footer._text === Eldritch.strings.talentTreeSpent.replace('{0}', 'The Ward').replace('{1}', '5'));
+
+    // the guarded Reset: confirm, refund, and the cancel path that keeps the build
+    panes.reset();
+    await wait(60);
+    ok('Reset asks first (the confirm is chrome, the pane never self-confirms)', EldPopup.isOpen === true);
+    EldPopup.okBtn.dispatch('click', {});
+    await wait(60);
+    ok('the confirmed Reset refunds every point into the pool',
+      panes.getSpent() === 0 && panes.points === 75);
+    sciWard._plates.get('moss').dispatch('click', {});
+    panes.reset();
+    await wait(60);
+    EldPopup.hide();
+    await wait(60);
+    ok('a cancelled Reset keeps the build', panes.getSpent() === 1);
+
+    // the silent load path round-trips
+    const snap = panes.serialize();
+    panes.restore({ points: 3, ranks: { blade: { blade: 2 } } });
+    ok('restore is the silent load path — pool and ranks land, no events',
+      panes.points === 3 && panes.pane('blade').getRank('blade') === 2 && panes.getSpent() === 2);
+    panes.restore(snap);
+    ok('serialize/restore round-trips the whole wall',
+      panes.getSpent() === 1 && sciWard.getRank('moss') === 1 && panes.points === 74);
+
+    // the ground circle: the wall's own errands through the nested wheel
+    engine.bus.emit('pointerdown', { x: 200, y: 600, button: 2, pointerId: 63, target: null, native: null });
+    await wait(60);
+    ok('ground: a right-click on the wall opens the wheel', ground.isOpen === true);
+    const poolG = panes.points;
+    ground._setIndex(0, false); // Talents
+    ground.onActivate();
+    await wait(40);
+    ground._setIndex(1, false); // Grant 5 Insight
+    ground.onActivate();
+    await wait(60);
+    ok('ground: the nested Grant pick banks five insight (an observable outcome)',
+      ground.isOpen === false && panes.points === poolG + 5);
+    panes.restore(snap); // the boot build back for the shot below
+
+    // keyboard parity: a focused plate learns on Enter through the same path
+    const gazePlate = panes.pane('gaze')._plates.get('gaze');
+    engine.focus.set(gazePlate, 'key');
+    engine.focus.activate();
+    ok('a focused plate learns on Enter — the pointer path and the key path agree',
+      panes.pane('gaze').getRank('gaze') === 1);
+
+    // cursor-transient chrome clears before the census reads the scene (the
+    // strategy-hud toast-decay precedent): the REAL pointer probes above parked
+    // the cursor on a plate, and its tooltip is not part of the resting page
+    EldTooltip.hideNow();
+    await wait(120);
+    const audit = runAudit(engine);
+    const cts = audit.counts;
+    const v0 = audit.violations[0];
+    ok(`the page audits clean on every rule${v0 ? ` [${v0.rule} ${v0.path} ${v0.detail ?? ''}]` : ''}`,
+      Object.values(cts).reduce((a, b) => a + b, 0) === 0);
+
+    ok('the page runs error-free end to end', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;bottom:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `TREES ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+    } catch (err) {
+      document.title = 'TREES ASSERT FAIL threw: ' + String(err?.message ?? err).slice(0, 60);
+    }
+  })();
+}
+
+if (FROZEN) {
+  // finish boot animations on a fixed clock, then halt the ticker (bit-stable frame)
+  setTimeout(() => {
+    const tk = engine.ticker;
+    tk.stop();
+    for (let i = 0; i < 600 && (tk.tweens.size > 0 || i < 20); i++) {
+      tk.time += 1 / 60;
+      tk._stepTweens(1 / 60);
+      for (const cb of [...tk.callbacks]) cb(1 / 60, tk.time);
+      if (tk._frame) tk._frame(1 / 60, tk.time);
+    }
+  }, 600);
+}
+
+if (!ASSERT) {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'TREES READY';
+  }, 1000);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,1139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Deckbuilder</title>
+<!-- @demo   The Drawn Hand: a real one-fight loop — cards dealt flying from the mound, harm that sweeps enemy bars and shakes plates, ward that soaks the answering blows, intents that telegraph and RESOLVE, deaths that fade the table, a reward pick, and the run map climbing floor by floor.
+     @shows  Card, HandFan, Pile, RunMap, CARD_SIZES, WorldAnchorLayer, ResourceChip, SegmentedBar, ProgressBar, FloatText, TitleCard, RadialMenu, Button, TextNode, UINode, QuadNode, NineSliceNode
+     @params ?freeze=1 — bit-stable snapshot boot (static board, fan of five, map parked) · ?assert=1 — the in-page suite titles its own PASS count -->
+
+<!-- the proof page, rebuilt as a playable fight; gave the
+     drag THE AIM LAW (attack cards rarely landed — the release
+ had to hit the plate's very box). Drag a card out: the valid foes glow
+     faint, the NEAREST one locks bright as the aim, and the release lands the
+     Harm on the AIMED foe wherever the drop falls on open board (witchflame
+     still burns ALL from anywhere; Rites and Lore play over open board with no
+     aim lit). Every hit sweeps the enemy's bar (the house 0.3s), flashes its
+     plate film, shakes it on render offsets, and floats the number. End Turn
+     resolves in beats: the hand flies to the discard, every living enemy KEEPS
+     its telegraph (attack soaks through ward first; gather heals), fresh
+     intents roll, energy refills, and five cards deal in from the mound. Kill
+     the table: a reward rises, the map's doors open, and each advance seeds a
+     harder floor — the top of the run (or a guttered candle) reseeds floor
+     one. Escape cancels a live drag (B7), a second finger is deaf (C3), chrome
+     occludes the board (C10). Target arrow, hover-inspect zoom, and the
+     exhaust pile stay on the cut line. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import {
+  Eldritch, Card, HandFan, Pile, RunMap, CARD_SIZES, WorldAnchorLayer, ResourceChip,
+  SegmentedBar, ProgressBar, FloatText, TitleCard, RadialMenu, Button, TextNode, UINode, QuadNode,
+  NineSliceNode, COLORS, FONTS, stagger, hitTest,
+} from '../src/lovecraft-ui.js';
+import * as THREE from 'three';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+// the census boots (audit/torture/resize) must see the RESTING table — the sim
+// gates at the source, not behind a dead window
+const INSTRUMENTED = FROZEN || ASSERT
+  || params.has('audit') || params.has('torture') || params.has('resize');
+// L12: the ?uiscale= hook — the couch-distance baseline set shoots through it
+const UISCALE = Number(params.get('uiscale'));
+const SCALE_OPT = Number.isFinite(UISCALE) && UISCALE > 0 ? { uiScale: UISCALE } : {};
+Eldritch.init(FROZEN || ASSERT
+  ? { ...SCALE_OPT, background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { ...SCALE_OPT, contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+
+// ---- the icon pack (optional download): the RE-SKIN idiom ----
+// `as:` points at icon ids this page ALREADY uses, so the registry re-bakes those NAMES
+// in place: every live quad follows with no page code and no atlas movement.
+// `fallback: 'none'` leaves the procedural art standing when assets/ is absent, which is
+// the shipped default - the pack is an optional download and the page must not need it.
+// Skipped under FROZEN: --screenshot captures at the load event and cannot wait for an
+// async decode, so frozen baselines run on the procedural art by necessity.
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-3649', as: 'book' },
+      { id: 'ico-0210', as: 'shield' },
+      { id: 'ico-0513', as: 'sword' },
+      { id: 'ico-0489', as: 'blindinglight' },
+      { id: 'ico-0707', as: 'arrows' },
+      { id: 'ico-0307', as: 'leafs' },
+      { id: 'ico-0394', as: 'deathkiss' },
+      { id: 'ico-0017', as: 'fireball' },
+      { id: 'ico-0078', as: 'fireball2' },
+    ],
+  });
+}
+
+window.engine = engine;
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+
+// Page placement must CHAIN a widget's own onLayout, never clobber it.
+const place = (node, fn) => {
+  const own = node.onLayout?.bind(node);
+  node.onLayout = function () { own?.(); fn.call(this); };
+};
+
+// ---- the table: a fixed camera over a candle-lit board (no orbit — a card table) ----
+const camA = 0.55;
+const CAM_R = 640, CAM_H = 300, FOV = 470;
+function project(x, y, z) {
+  const cx = Math.sin(camA) * CAM_R, cy = CAM_H, cz = Math.cos(camA) * CAM_R;
+  const fl = Math.hypot(cx, cy, cz);
+  const fx = -cx / fl, fy = -cy / fl, fz = -cz / fl;
+  const rl = Math.hypot(fz, fx) || 1;
+  const rx = fz / rl, rz = -fx / rl;
+  const ux = fy * rz, uy = fz * rx - fx * rz, uz = -fy * rx;
+  const dx = x - cx, dy = y - cy, dz = z - cz;
+  const depth = dx * fx + dy * fy + dz * fz;
+  const s = FOV / Math.max(24, depth);
+  return {
+    sx: engine.width / 2 + (dx * rx + dz * rz) * s,
+    sy: engine.height / 2 - 60 - (dx * ux + dy * uy + dz * uz) * s,
+    visible: depth > 24,
+    depth,
+  };
+}
+
+// ---- the backdrop: ONE page-owned canvas (was ~35 dot quads) — deterministic
+// paint, zero atlas/registry entries by construction, repainted on resize ----
+const backdrop = new UINode({ name: 'table-backdrop' });
+const bdCanvas = document.createElement('canvas');
+const bdTex = new THREE.CanvasTexture(bdCanvas);
+bdTex.colorSpace = THREE.SRGBColorSpace;
+const bdQuad = new QuadNode({ texture: bdTex });
+backdrop.add(bdQuad);
+// seeded so the grain, the stains and the plank seams are bit-stable under ?freeze=1
+function tableRng(seed) {
+  let s = seed >>> 0;
+  return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+}
+function paintBackdrop() {
+  const W = Math.max(2, engine.width), H = Math.max(2, engine.height);
+  if (bdCanvas.width !== W || bdCanvas.height !== H) { bdCanvas.width = W; bdCanvas.height = H; }
+  const ctx = bdCanvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  // the table is a TABLE now. The enemy row used to float over a candle wash
+  // and thirty-five dots, so the middle of the frame read as nothing at all.
+  ctx.fillStyle = '#0a0908';
+  ctx.fillRect(0, 0, W, H);
+  const tr = tableRng(0x51de);
+  // waxed boards running away from the player, darkening toward the far edge
+  const boards = ctx.createLinearGradient(0, 0, 0, H);
+  boards.addColorStop(0, '#0c0b0a');
+  boards.addColorStop(0.55, '#171310');
+  boards.addColorStop(1, '#221b16');
+  ctx.fillStyle = boards;
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+  ctx.lineWidth = 1;
+  for (let i = -7; i <= 7; i++) {                    // plank seams, in perspective
+    ctx.beginPath();
+    ctx.moveTo(W / 2 + i * 40, 0);
+    ctx.lineTo(W / 2 + i * 190, H);
+    ctx.stroke();
+  }
+  for (let i = 0; i < 240; i++) {                    // grain, and old ring stains
+    const y = tr() * H, x = tr() * W, len = 12 + tr() * 70;
+    ctx.strokeStyle = `rgba(0,0,0,${0.05 + tr() * 0.10})`;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.bezierCurveTo(x + len * 0.4, y - 2, x + len * 0.7, y + 2, x + len, y);
+    ctx.stroke();
+  }
+  for (let i = 0; i < 5; i++) {
+    const x = 90 + tr() * (W - 180), y = 60 + tr() * (H - 200), rr = 22 + tr() * 26;
+    ctx.strokeStyle = 'rgba(0,0,0,0.16)';
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.ellipse(x, y, rr, rr * 0.34, 0, 0, Math.PI * 2); ctx.stroke();
+  }
+  // the candle glow pooling on the table
+  const glow = ctx.createRadialGradient(W / 2, H * 0.62, 40, W / 2, H * 0.62, H * 0.7);
+  glow.addColorStop(0, 'rgba(232,196,120,0.075)');
+  glow.addColorStop(0.5, 'rgba(200,150,80,0.028)');
+  glow.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+  // the projected grid of table points
+  ctx.fillStyle = 'rgba(111,209,139,0.14)';
+  for (let gx = -3; gx <= 3; gx++) {
+    for (let gz = -2; gz <= 2; gz++) {
+      const p = project(gx * 130, 0, gz * 130);
+      if (!p.visible) continue;
+      ctx.fillRect(Math.round(p.sx), Math.round(p.sy), 3, 3);
+    }
+  }
+  // a faint summoning ring under the enemy row
+  const ring = project(30, 0, -190);
+  ctx.strokeStyle = 'rgba(111,209,139,0.10)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.ellipse(ring.sx, ring.sy, 330, 74, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  bdTex.needsUpdate = true;
+}
+place(backdrop, function () {
+  this.setRect(0, 0, engine.width, engine.height);
+  bdQuad.setRect(0, 0, engine.width, engine.height);
+  paintBackdrop();
+});
+backdrop.on('dispose', () => bdTex.dispose());
+engine.layers.background.add(backdrop);
+
+// ---- the world: enemy plates seated by the anchor layer, intents riding above ----
+const anchors = new WorldAnchorLayer({ project });
+engine.layers.background.add(anchors);
+
+const SPOTS = [{ x: -340, y: 60, z: -140 }, { x: 60, y: 60, z: -320 }, { x: 380, y: 60, z: -100 }];
+const FIGHT_SEED = [
+  { name: 'Deep Hybrid', hp: 8 },
+  { name: 'Cult Warden', hp: 10 },
+  { name: 'Star Spawn', hp: 12 },
+];
+let enemies = [];
+
+function makeEnemy(name, hp, spot) {
+  const plate = new UINode({ interactive: true });
+  const bg = new NineSliceNode(engine.textures.frame('tooltip.frame'));
+  const label = new TextNode(name, {
+    font: FONTS.header, size: 13, smallCaps: true, letterSpacing: 1,
+    color: COLORS.bone, shadow,
+  });
+  // height 16: the bar art insets 6px each side — a 10px bar starves its cells
+  const bar = new SegmentedBar({ segments: 4, value: 4, max: 4, width: 132, height: 16 });
+  // the hit film: a blood wash that flashes on harm (rests transparent — culled)
+  const film = new QuadNode({ color: COLORS.negative, opacity: 1 });
+  film.fxOpacity = 0;
+  film.auditAllow('overlap', 'containment'); // the wash rides the whole plate by design
+  // the aim film: the accent wash the drag chrome raises — faint on
+  // every valid foe, bright on the AIMED one (rests transparent — culled)
+  const aimFilm = new QuadNode({ color: COLORS.accent, opacity: 1 });
+  aimFilm.fxOpacity = 0;
+  aimFilm.auditAllow('overlap', 'containment');
+  const w = Math.max(Math.ceil(label.w) + 24, 156);
+  plate.add(bg, film, aimFilm, label, bar);
+  bg.setRect(0, 0, w, 54);
+  film.setRect(2, 2, w - 4, 50);
+  aimFilm.setRect(2, 2, w - 4, 50);
+  label.setPos(12, 8);
+  bar.setPos(12, 32);
+  plate.setSize(w, 54);
+  anchors.anchor(plate, spot, { dy: -27 });
+  // the intent chip: a world-anchored telegraph over the plate
+  const intent = new UINode();
+  const ibg = new QuadNode({ color: COLORS.voidBlack, opacity: 0.8 });
+  const iicon = new QuadNode({ texture: engine.textures.get('icon.arrows') });
+  const itext = new TextNode('', {
+    font: FONTS.mono, size: 12, weight: 'bold', color: COLORS.negative, shadow,
+  });
+  intent.add(ibg, iicon, itext);
+  ibg.setRect(0, 0, 46, 22);
+  iicon.setRect(4, 3, 16, 16);
+  itext.setPos(26, 4);
+  intent.setSize(46, 22);
+  anchors.anchor(intent, spot, { dy: -78 });
+  return {
+    plate, bar, film, aimFilm, label, name, spot,
+    intentNode: intent, iicon, itext,
+    hp, hpMax: hp, alive: true,
+    intent: { kind: 'attack', value: 2 },
+  };
+}
+
+function seedEnemies(mult = 1) {
+  for (const e of enemies) { e.plate.dispose(); e.intentNode.dispose(); }
+  enemies = FIGHT_SEED.map((f, i) => makeEnemy(f.name, Math.round(f.hp * mult), SPOTS[i]));
+  fan.setTargets(enemies.map((e) => e.plate));
+  rollIntents();
+}
+const living = () => enemies.filter((e) => e.alive);
+
+// ---- the deck (defs are the MODEL; Card nodes are its presentation) ----
+const DECK = [
+  { id: 'lantern-oath', name: 'Lantern Oath', cost: 1, type: 'Rite', body: 'Gain {b}2{/} ward.', art: 'blindinglight', rarity: 'common' },
+  { id: 'drowning-grip', name: 'Drowning Grip', cost: 2, type: 'Harm', body: 'Deal {b}3{/} harm.', art: 'arrows', rarity: 'common' },
+  { id: 'pale-ward', name: 'Pale Ward', cost: 1, type: 'Rite', body: 'Gain {b}3{/} ward.', art: 'shield', rarity: 'rare' },
+  { id: 'forbidden-page', name: 'Forbidden Page', cost: 1, type: 'Lore', body: 'Draw {b}2{/} cards.', art: 'book', rarity: 'rare' },
+  { id: 'witchflame', name: 'Witchflame', cost: 2, type: 'Harm', body: 'Deal {b}2{/} harm to ALL.', art: 'fireball', rarity: 'epic' },
+  { id: 'last-kiss', name: 'The Last Kiss', cost: 3, type: 'Harm', body: 'Deal {b}6{/} harm.', art: 'deathkiss', rarity: 'legendary' },
+  { id: 'salt-circle', name: 'Salt Circle', cost: 0, type: 'Rite', body: 'Gain {b}1{/} ward.', art: 'shield', rarity: 'common' },
+  { id: 'tide-reading', name: 'Tide Reading', cost: 1, type: 'Lore', body: 'Draw {b}1{/} card.', art: 'book', rarity: 'common' },
+  { id: 'harpoon-cast', name: 'Harpoon Cast', cost: 2, type: 'Harm', body: 'Deal {b}4{/} harm.', art: 'arrows', rarity: 'rare' },
+  { id: 'candle-vigil', name: 'Candle Vigil', cost: 0, type: 'Rite', body: 'Mend {b}2{/} hurt.', art: 'blindinglight', rarity: 'common' },
+];
+// what each card DOES — the page's rules table
+const EFFECTS = {
+  'lantern-oath': { ward: 2 }, 'drowning-grip': { harm: 3 }, 'pale-ward': { ward: 3 },
+  'forbidden-page': { draw: 2 }, 'witchflame': { harm: 2, all: true }, 'last-kiss': { harm: 6 },
+  'salt-circle': { ward: 1 }, 'tide-reading': { draw: 1 }, 'harpoon-cast': { harm: 4 },
+  'candle-vigil': { heal: 2 },
+};
+const defOf = (card) => DECK.find((d) => d.id === card.id) ?? {
+  id: card.id, name: card.name, cost: card.cost, type: card.type,
+  body: card.body, art: card.art, rarity: card.rarity,
+};
+
+// ---- the mounds ----
+const drawPile = new Pile({ kind: 'draw', label: 'Draw', cards: DECK.slice(5) });
+place(drawPile, function () { this.setPos(28, engine.height - this.h - 16); });
+engine.layers.overlay.add(drawPile);
+const discardPile = new Pile({ kind: 'discard', label: 'Discard', cards: [] });
+place(discardPile, function () { this.setPos(engine.width - this.w - 28, engine.height - this.h - 16); });
+engine.layers.overlay.add(discardPile);
+const pileCenter = (p) => ({ x: p.worldX + p.w / 2, y: p.worldY + p.h / 2 });
+
+// ---- the hand ----
+// 680, not 560: a five-card hand of 126px cards needs 5*126 + gaps to stand clear,
+// and the fan only separates as far as its budget allows (drawnhand.js _applyPositions)
+const fan = new HandFan({ maxWidth: 680 });
+place(fan, function () {
+  this.setPos(Math.round((engine.width - this.w) / 2), engine.height - this.h + 6);
+});
+engine.layers.overlay.add(fan);
+
+// ---- the player: vitals plate, energy, ward ----
+const state = { energy: 3, cap: 3, hp: 30, hpMax: 30, ward: 0, phase: 'fight', turn: 0, turnToken: 0 };
+const chip = new ResourceChip({ icon: 'fireball', value: state.energy, cap: 3, width: 104 });
+place(chip, function () { this.setPos(24, 18); });
+engine.layers.overlay.add(chip);
+const wardChip = new ResourceChip({ icon: 'shield', value: 0, cap: 9, width: 104 });
+place(wardChip, function () { this.setPos(136, 18); });
+engine.layers.overlay.add(wardChip);
+
+const player = new UINode({ name: 'player-plate' });
+const pBg = new NineSliceNode(engine.textures.frame('tooltip.frame'));
+const pName = new TextNode('The Lanternkeeper', {
+  font: FONTS.header, size: 13, smallCaps: true, letterSpacing: 1, color: COLORS.accent, shadow,
+});
+const pBar = new ProgressBar({ value: 100, width: 176, height: 16 });
+const pText = new TextNode('30/30', { font: FONTS.mono, size: 11, color: COLORS.bone, shadow });
+player.add(pBg, pName, pBar, pText);
+pBg.setRect(0, 0, 232, 64);
+pName.setPos(12, 8);
+pBar.setPos(12, 32);
+pText.setPos(184, 10);
+player.setSize(232, 64);
+place(player, function () { this.setPos(24, engine.height - 258); });
+engine.layers.overlay.add(player);
+
+// pooled combat floaters — one pool for hits, heals, and ward
+const floats = new FloatText({ pool: 12 });
+floats.setPos(0, 0);
+engine.layers.overlay.add(floats);
+
+function refreshAffordance() {
+  chip.setValue(state.energy);
+  for (const c of fan.cards) c.setPlayable(c.cost <= state.energy);
+}
+function refreshVitals() {
+  pBar.setValue(Math.max(0, (state.hp / state.hpMax) * 100));
+  pText.setText(`${Math.max(0, state.hp)}/${state.hpMax}`);
+  wardChip.setValue(state.ward);
+}
+
+// ---- the juice verbs (render-only; parked under instruments/reducedMotion) ----
+const JUICE = () => !INSTRUMENTED && !Eldritch.reducedMotion;
+const voice = (kind) => engine.bus.emit('uisound', { kind, node: null, data: {} });
+function shake(node) {
+  if (!JUICE()) return;
+  node.fxOffsetX = 5;
+  engine.ticker.tween(node, { fxOffsetX: -3 }, {
+    dur: 0.08, onDone: () => engine.ticker.tween(node, { fxOffsetX: 0 }, { dur: 0.12 }),
+  });
+}
+function filmFlash(e) {
+  if (!JUICE()) return;
+  e.film.fxOpacity = 0.35;
+  engine.ticker.tween(e.film, { fxOpacity: 0 }, { dur: 0.2 });
+}
+function floatAt(node, text, opts) {
+  if (!JUICE()) return;
+  floats.spawn(text, node.worldX + node.w / 2, node.worldY, opts);
+}
+
+// ---- the beat queue: End Turn resolves in ordered beats (sync under instruments) ----
+const beats = [];
+let beatT = 0;
+engine.ticker.add((dt) => {
+  if (!beats.length) { beatT = 0; return; }
+  beatT += dt;
+  while (beats.length && beats[0].at <= beatT) beats.shift().run();
+});
+function queue(fns, gap = 0.35) {
+  if (!JUICE()) { for (const f of fns) f(); return; }
+  const base = beats.length ? beats[beats.length - 1].at : beatT;
+  fns.forEach((f, i) => beats.push({ at: base + gap * (i + 1), run: f }));
+}
+
+// ---- the combat verbs (the model commits; the juice narrates) ----
+function pipsOf(e) { return Math.ceil((e.hp / e.hpMax) * 4); }
+function damage(e, n) {
+  if (!e.alive) return;
+  e.hp = Math.max(0, e.hp - n);
+  e.bar.setValue(pipsOf(e));
+  filmFlash(e); shake(e.plate);
+  floatAt(e.plate, `-${n}`, { crit: e.hp === 0 });
+  voice('cast');
+  if (e.hp === 0) slay(e);
+}
+function healEnemy(e, n) {
+  if (!e.alive) return;
+  e.hp = Math.min(e.hpMax, e.hp + n);
+  e.bar.setValue(pipsOf(e));
+  floatAt(e.plate, `+${n}`, { color: COLORS.accent });
+}
+function slay(e) {
+  e.alive = false;
+  const fade = () => { e.plate.dispose(); e.intentNode.dispose(); };
+  if (JUICE()) {
+    engine.ticker.tween(e.plate, { fxOpacity: 0 }, { dur: 0.4, onDone: fade });
+    engine.ticker.tween(e.intentNode, { fxOpacity: 0 }, { dur: 0.4 });
+  } else fade();
+  fan.setTargets(living().map((x) => x.plate));
+  if (!living().length && state.phase === 'fight') victory();
+}
+function hurtPlayer(n) {
+  const soaked = Math.min(state.ward, n);
+  state.ward -= soaked;
+  const dmg = n - soaked;
+  state.hp = Math.max(0, state.hp - dmg);
+  refreshVitals();
+  if (dmg > 0) {
+    shake(player); floatAt(player, `-${dmg}`, { crit: state.hp === 0 }); voice('error');
+  } else floatAt(player, 'warded', { color: COLORS.accent });
+  if (state.hp === 0) gutter();
+}
+function actEnemy(e) {
+  if (!e.alive || state.phase !== 'fight') return;
+  if (e.intent.kind === 'attack') hurtPlayer(e.intent.value);
+  else healEnemy(e, 2);
+}
+function rollIntents() {
+  state.turn += 1;
+  living().forEach((e, i) => {
+    const gather = (state.turn + i) % 3 === 2;
+    e.intent = gather ? { kind: 'gather', value: 2 } : { kind: 'attack', value: 2 + ((state.turn + i) % 3) };
+    e.iicon.setTexture(engine.textures.get(gather ? 'icon.leafs' : 'icon.arrows'));
+    e.itext.setText(gather ? '+2' : String(e.intent.value));
+    e.itext.setColor(gather ? COLORS.accent : COLORS.negative);
+  });
+}
+
+// ---- the play rules ----
+const played = [];
+fan.on('play', ({ card, onto }) => {
+  if (card.cost > state.energy) { voice('error'); return; } // cannot pay: the fan bounces it
+  const fx = EFFECTS[card.id] ?? {};
+  const target = onto ? living().find((e) => e.plate === onto) : null;
+  if (fx.harm && !fx.all && !target) return; // targeted harm needs a target: bounce free
+  state.energy -= card.cost;
+  played.push({ id: card.id, onto: onto ?? null });
+  if (fx.harm) {
+    if (fx.all) for (const e of [...living()]) damage(e, fx.harm);
+    else damage(target, fx.harm);
+  }
+  if (fx.ward) { state.ward += fx.ward; refreshVitals(); floatAt(player, `+${fx.ward} ward`, { color: COLORS.accent }); voice('cast'); }
+  if (fx.heal) { state.hp = Math.min(state.hpMax, state.hp + fx.heal); refreshVitals(); floatAt(player, `+${fx.heal}`, { color: COLORS.accent }); voice('cast'); }
+  discardPile.push(defOf(card));
+  fan.removeCard(card, { to: pileCenter(discardPile), dispose: true });
+  if (fx.draw) drawCards(fx.draw);
+  refreshAffordance();
+});
+
+// ---- the aim chrome: while a targeted Harm is out, every valid foe
+// glows faint and the AIMED one locks bright — the EldDragDrop mandate-13 idiom,
+// driven by the fan's `targetchange` narration (consumer chrome, consumer truth) ----
+const AIM_VALID = 0.10, AIM_LOCK = 0.25;
+const isTargetedHarm = (card) => { const fx = EFFECTS[card.id] ?? {}; return !!fx.harm && !fx.all; };
+const aims = []; // the narration trail (the input replay reads it)
+fan.on('dragstart', ({ card }) => {
+  // per-card targets: only a targeted Harm aims — Rites, Lore, and burn-ALL
+  // fly free with no foe lit
+  fan.setTargets(isTargetedHarm(card) ? living().map((e) => e.plate) : []);
+  if (isTargetedHarm(card)) for (const e of living()) e.aimFilm.fxOpacity = AIM_VALID;
+});
+fan.on('targetchange', ({ onto, prev }) => {
+  const pe = prev && enemies.find((e) => e.plate === prev);
+  if (pe && pe.alive) pe.aimFilm.fxOpacity = AIM_VALID;
+  const oe = onto && enemies.find((e) => e.plate === onto);
+  if (oe && oe.alive) oe.aimFilm.fxOpacity = AIM_LOCK;
+  aims.push(oe ? oe.name : null);
+});
+fan.on('dragend', () => {
+  for (const e of enemies) e.aimFilm.fxOpacity = 0; // the chrome stands down
+  fan.setTargets(living().map((e) => e.plate));      // the standing set returns
+});
+
+// ---- the turn cycle: beats — discard, each enemy acts, intents, refill, deal ----
+function drawCards(n) {
+  for (let i = 0; i < n; i++) {
+    if (drawPile.count === 0 && discardPile.count > 0) {
+      drawPile.setCards(discardPile.cards); // the mound turns over whole (deterministic)
+      discardPile.setCards([]);
+      voice('swap');
+    }
+    const def = drawPile.pop();
+    if (!def) break;
+    fan.addCard(new Card(def), { from: pileCenter(drawPile) }); // the deal flight
+  }
+  refreshAffordance();
+}
+function endTurn() {
+  if (state.phase !== 'fight') return;
+  const tok = ++state.turnToken;
+  const alive = () => state.turnToken === tok && state.phase === 'fight';
+  const steps = [
+    () => {
+      for (const card of [...fan.cards]) {
+        discardPile.push(defOf(card));
+        fan.removeCard(card, { to: pileCenter(discardPile), dispose: true });
+      }
+    },
+    ...enemies.map((e) => () => { if (alive() || state.turnToken === tok) actEnemy(e); }),
+    () => { if (alive()) rollIntents(); },
+    () => {
+      if (!alive()) return;
+      state.energy = state.cap;
+      drawCards(5);
+    },
+  ];
+  queue(steps, 0.35);
+}
+const endBtn = new Button('End Turn', { minWidth: 108, onClick: endTurn });
+place(endBtn, function () { this.setPos(engine.width - this.w - 24, engine.height - this.h - 130); });
+engine.layers.overlay.add(endBtn);
+
+// ---- victory, the reward pick, the map, the loop's two endings ----
+let rewardRow = null;
+function rewardPick(defs = [DECK[3], DECK[4], DECK[5]]) {
+  if (rewardRow) return rewardRow;
+  const row = new UINode({ name: 'reward-row', interactive: true });
+  const label = new TextNode('Claim one relic of the deep', {
+    font: FONTS.header, size: 15, smallCaps: true, letterSpacing: 2,
+    color: COLORS.accent, shadow,
+  });
+  row.add(label);
+  const { w: CW, h: CH } = CARD_SIZES.full;
+  const GAP = 22;
+  const total = defs.length * CW + (defs.length - 1) * GAP;
+  const cards = defs.map((def, i) => {
+    const card = new Card({ ...def, size: 'full' });
+    card.setPos(i * (CW + GAP), 34);
+    card.on('click', () => {
+      drawPile.push(def);
+      closeReward();
+      afterClaim();
+    });
+    row.add(card);
+    return card;
+  });
+  label.setPos(Math.round((total - label.w) / 2), 0);
+  row.setSize(total, CH + 34);
+  row.setPos(Math.round((engine.width - total) / 2), Math.round((engine.height - CH) / 2 - 60));
+  engine.layers.overlay.add(row);
+  if (JUICE()) stagger(cards, 'rise', { gap: 0.07 });
+  rewardRow = row;
+  return row;
+}
+function closeReward() {
+  if (!rewardRow) return;
+  rewardRow.dispose();
+  rewardRow = null;
+}
+function victory() {
+  state.phase = 'reward';
+  TitleCard.show({ title: 'The Table Clears', hold: 1.0 });
+  rewardPick();
+}
+function afterClaim() {
+  if (state.phase !== 'reward') return;
+  state.phase = 'map';
+  const doorsOpen = RUN.nodes.some((n) => runMap.getState(n.id) === 'available');
+  if (!doorsOpen) {
+    TitleCard.show({ title: 'The Run Ends', subtitle: 'The tide returns', hold: 1.4 });
+    resetRun();
+    return;
+  }
+  TitleCard.show({ title: 'Choose the Descent', hold: 1.0 });
+}
+const FLOOR_TITLES = {
+  'fight-a': 'The Flooded Market', market: 'The Salt Bazaar', omen: 'The Omen Well',
+  depths: 'The Depths', warden: 'The Warden of Salt',
+};
+function nextFight(nodeId) {
+  const node = RUN.nodes.find((n) => n.id === nodeId);
+  const mult = Math.pow(1.35, node?.floor ?? 1);
+  // the deck reassembles whole, then a fresh hand deals from the mound
+  const defs = [...fan.cards.map(defOf), ...discardPile.cards, ...drawPile.cards];
+  for (const card of [...fan.cards]) fan.removeCard(card, { dispose: true, animate: false });
+  drawPile.setCards(defs);
+  discardPile.setCards([]);
+  seedEnemies(mult);
+  state.energy = state.cap;
+  state.ward = 0;
+  state.phase = 'fight';
+  refreshVitals();
+  TitleCard.show({ title: `Floor ${node?.floor ?? '?'} — ${FLOOR_TITLES[nodeId] ?? 'The Descent'}`, hold: 1.1 });
+  drawCards(5);
+}
+function gutter() {
+  TitleCard.show({ title: 'The Candle Gutters', subtitle: 'The run reseeds', hold: 1.4 });
+  resetRun();
+}
+function resetRun() {
+  state.hp = state.hpMax; state.ward = 0; state.energy = state.cap;
+  state.phase = 'fight'; state.turn = 0;
+  closeReward();
+  runMap.setData(RUN, { position: 'gate' });
+  for (const card of [...fan.cards]) fan.removeCard(card, { dispose: true, animate: false });
+  drawPile.setCards(DECK.slice(5));
+  discardPile.setCards([]);
+  for (const def of DECK.slice(0, 5)) fan.addCard(new Card(def), { animate: false });
+  seedEnemies(1);
+  refreshVitals();
+  refreshAffordance();
+}
+
+// ---- the run map: the climb between fights ----
+const RUN = {
+  nodes: [
+    { id: 'gate', icon: 'book', floor: 0 },
+    { id: 'shrine', icon: 'blindinglight', floor: 0 },
+    { id: 'fight-a', icon: 'arrows', floor: 1, requires: ['gate'] },
+    { id: 'market', icon: 'shield', floor: 1, requires: ['gate', 'shrine'] },
+    { id: 'omen', icon: 'book', floor: 1, requires: ['shrine'] },
+    { id: 'depths', icon: 'fireball', floor: 2, requires: ['fight-a', 'market'] },
+    { id: 'warden', icon: 'deathkiss', floor: 2, requires: ['omen'] },
+  ],
+};
+const mapPanel = new UINode({ name: 'map-panel' });
+const mapBg = new NineSliceNode(engine.textures.frame('panel.dark'));
+const runMap = new RunMap({
+  data: RUN, position: 'gate',
+  width: 296, height: 236, plateSize: 38, floorGap: 30, colGap: 26,
+});
+mapPanel.add(mapBg, runMap);
+mapBg.setRect(0, 0, 312, 252);
+runMap.setPos(8, 8);
+mapPanel.setSize(312, 252);
+place(mapPanel, function () { this.setPos(engine.width - this.w - 24, 64); });
+engine.layers.overlay.add(mapPanel);
+runMap.on('advance', (e) => { if (state.phase === 'map') nextFight(e.id); });
+
+// ---- boot: the table seats; live boots open with the deal ----
+seedEnemies(1);
+refreshVitals();
+if (!JUICE()) {
+  // instrumented/reduced boots: the hand seats instantly — the census and the
+  // frozen shot see the settled table
+  for (const def of DECK.slice(0, 5)) fan.addCard(new Card(def), { animate: false });
+  refreshAffordance();
+} else {
+  // the opening beats: the title, the deal (five flights from the mound), the telegraphs
+  const HAND = DECK.slice(0, 5);
+  queue([
+    () => TitleCard.show({ title: 'Floor 1 — The Gate', hold: 1.1 }),
+    () => { for (const def of HAND) fan.addCard(new Card(def), { from: pileCenter(drawPile) }); refreshAffordance(); },
+    () => rollIntents(),
+  ], 0.45);
+}
+window.__deck = {
+  state, enemies: () => enemies, damage, endTurn, rollIntents, played, fan, drawPile, discardPile,
+  aims,
+  harmCard: () => fan.cards.find((c) => isTargetedHarm(c) && c.cost <= state.energy) ?? null,
+  // a spot on the open board near the first foe but clear of its plate — the
+  // drive's drag releases here and the aim law must still land the harm
+  openBoardAt: () => ({
+    x: Math.round(enemies[0].plate.worldX - 60),
+    y: Math.round(enemies[0].plate.worldY + 80),
+  }),
+  aimFilms: () => enemies.map((e) => e.aimFilm.fxOpacity),
+};
+
+// ---- the ground circle: right-click on the table opens the wheel;
+// cards, piles, and enemies keep their own presses (the ruling). End Turn
+// rides the page's own verb (it refuses outside the fight phase on its own);
+// the pile browses ride each Pile's public activation — the same Window a
+// click or Enter opens.
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'endturn', label: 'End Turn' },
+ { id: 'piles', label: 'Piles', children: [
+ { id: 'deck', label: 'Deck' },
+ { id: 'discard', label: 'Discard' },
+ ] },
+ ],
+});
+ground.on('select', ({ id, path }) => {
+  if (id === 'endturn') endTurn();
+  else if (path[0] === 'piles') (id === 'deck' ? drawPile : discardPile).onActivate();
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+window.__deck.ground = ground;
+
+// ?pose=hover (with ?freeze=1): boots with a card lifted — the hover state is a
+// reviewable artifact, not a moment only a live pointer can see
+if (FROZEN && params.get('pose') === 'hover') {
+  fan.setHover(fan.cards[2]);
+}
+
+// ---- READY / ASSERT ----
+if (!ASSERT) {
+  setTimeout(() => {
+    document.title = window.__errs.length ? 'DECKBUILDER BOOT FAIL: ' + window.__errs[0] : 'DECKBUILDER READY';
+  }, 1000);
+} else {
+  (async () => {
+    const results = [];
+    let fails = 0;
+    const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    await wait(400); // settle the boot
+
+    ok('boot: five in hand, five to draw, none discarded, three energy',
+      fan.cards.length === 5 && drawPile.count === 5 && discardPile.count === 0 && state.energy === 3);
+    ok('boot: no page errors', window.__errs.length === 0);
+    ok('boot: the vitals stand (hp 30, no ward, three foes telegraphing)',
+      state.hp === 30 && state.ward === 0 && state.phase === 'fight'
+      && living().length === 3 && enemies.every((e) => e.itext._text !== ''));
+
+    // ---- the resting layout: the bottom band shares one shore without collisions ----
+    // Every box down there is a hand-placed offset (player at H-258, endBtn at
+    // H-130, the mounds at H-h-16, the fan riding the bottom edge) — nothing
+    // derives from anything else, so ONE drifted constant overlaps two boxes and
+    // no other instrument reads it (the resting reach audit sees no dialogs).
+    // Inspected at rest: no pair overlaps by design, so any hit is a defect and
+    // the message names the drifted pair.
+    {
+      const fixtures = [
+        ['fan', fan], ['player', player], ['endTurn', endBtn],
+        ['draw', drawPile], ['discard', discardPile],
+      ];
+      const touching = [];
+      for (let i = 0; i < fixtures.length; i++) {
+        for (let j = i + 1; j < fixtures.length; j++) {
+          const [an, a] = fixtures[i];
+          const [bn, b] = fixtures[j];
+          if (a.worldX < b.worldX + b.w && b.worldX < a.worldX + a.w
+            && a.worldY < b.worldY + b.h && b.worldY < a.worldY + a.h) touching.push(`${an}+${bn}`);
+        }
+      }
+      ok(`layout: fan, player, End Turn and both mounds rest without touching [${touching.join(' ') || 'clear'}]`,
+        touching.length === 0);
+    }
+
+    // ---- fan layout law: 1 card centers; 12 cards resolve into the width budget ----
+    Eldritch.reducedMotion = true; // gestures and lifts snap for deterministic probes
+    const solo = new HandFan({ maxWidth: 400 });
+    solo.setPos(60, 60);
+    engine.layers.background.add(solo);
+    solo.addCard(new Card(DECK[0]));
+    await wait(60);
+    ok('fan: a lone card sits centered', Math.abs((solo.cards[0].x + solo.cards[0].w / 2) - solo.w / 2) <= 1);
+    for (let i = 1; i < 12; i++) solo.addCard(new Card(DECK[i % DECK.length]));
+    await wait(60);
+    const xs = solo.cards.map((c) => c.x);
+    const span = Math.max(...xs) + solo.cards[0].w - Math.min(...xs);
+    ok('fan: twelve cards overlap-resolve inside maxWidth', solo.cards.length === 12 && span <= 400);
+    ok('fan: the arc dips its wings (edge cards ride lower than the center)',
+      solo.cards[0].y > solo.cards[6].y && solo.cards[11].y > solo.cards[6].y);
+
+    // ---- hover-lift with parting neighbors (reducedMotion: positions snap) ----
+    const midCard = solo.cards[6];
+    const beforeLift = { y: midCard.y, leftX: solo.cards[5].x, rightX: solo.cards[7].x };
+    solo._setHover(midCard);
+    ok('hover: the hovered card lifts by the fan\'s lift', beforeLift.y - midCard.y === solo.lift);
+    ok('hover: the neighbors part around it',
+      solo.cards[5].x < beforeLift.leftX && solo.cards[7].x > beforeLift.rightX);
+    solo._setHover(null);
+    ok('hover: clearing the hover reseats the row', midCard.y === beforeLift.y);
+
+    // ---- the deal: a card added {from} flies from the mound (real motion) ----
+    Eldritch.reducedMotion = false;
+    const mound = { x: 80, y: 640 };
+    const dealt = new Card(DECK[7]);
+    solo.addCard(dealt, { from: mound });
+    ok('deal: the card seats at the mound before its flight',
+      dealt.x === Math.round((mound.x - solo.worldX) / (solo.worldScale || 1) - dealt.w / 2));
+    await wait(300);
+    ok('deal: the flight lands on the fan seat', dealt.x === dealt._fanX && dealt.y === dealt._fanY);
+    Eldritch.reducedMotion = true;
+    solo.dispose();
+
+    // ---- the drag branches (synthetic bus gestures — the fixture form) ----
+    engine.pointerInside = true;
+    const target = enemies[0];
+    const hpBefore = target.hp;
+    const playCard = fan.cards.find((c) => c.id === 'drowning-grip');
+    const start = { x: playCard.worldX + playCard.w / 2, y: playCard.worldY + 20 };
+    playCard.dispatch('pointerdown', { x: start.x, y: start.y, button: 0, pointerId: 41 });
+    engine.bus.emit('pointermove', { x: start.x + 10, y: start.y - 40, pointerId: 41 });
+    const dropAt = { x: target.plate.worldX + target.plate.w / 2, y: target.plate.worldY + 10 };
+    engine.bus.emit('pointermove', { x: dropAt.x, y: dropAt.y, pointerId: 41 });
+    engine.bus.emit('pointerup', { x: dropAt.x, y: dropAt.y, button: 0, pointerId: 41 });
+    await wait(60);
+    engine.captures.clear();
+    ok('play: a drop on an enemy commits {card, onto} and the model follows',
+      played.length === 1 && played[0].id === 'drowning-grip' && played[0].onto === target.plate);
+    ok('play: the enemy paid in HURT and the card paid in energy'
+      + ` [live hp=${target.hp} energy=${state.energy}]`,
+      target.hp === hpBefore - 3 && state.energy === 1 && discardPile.count === 1 && fan.cards.length === 4);
+
+    // ---- the segbar sweep on the page (real motion; the number commits instantly) ----
+    // The committed number and the SWEPT fill are different fields: bar.value
+    // lands the instant the model does, while `_displayValue` (meters.js) travels
+    // the house 0.3s to meet it. Sampling BOTH mid-flight is what pins "the bar
+    // sweeps" — reading bar.value alone stayed green even with the sweep dead.
+    Eldritch.reducedMotion = false;
+    window.__deck.damage(target, 1);
+    ok('juice: the hurt commits instantly while the bar sweeps (house 0.3s)',
+      target.hp === hpBefore - 4 && target.bar.value === pipsOf(target));
+    await wait(100);
+    ok('juice: mid-sweep the displayed fill still travels — the eye sees motion, the model is done',
+      target.bar._displayValue !== target.bar.value);
+    await wait(300);
+    ok('juice: the sweep lands exactly on the committed number',
+      target.bar._displayValue === target.bar.value);
+    Eldritch.reducedMotion = true;
+
+    // ---- the cancel branch: a release back in the fan zone plays nothing ----
+    const stayCard = fan.cards[0];
+    const home = { x: stayCard.x, y: stayCard.y };
+    const s2 = { x: stayCard.worldX + stayCard.w / 2, y: stayCard.worldY + 20 };
+    stayCard.dispatch('pointerdown', { x: s2.x, y: s2.y, button: 0, pointerId: 42 });
+    engine.bus.emit('pointermove', { x: s2.x + 30, y: s2.y - 30, pointerId: 42 });
+    engine.bus.emit('pointerup', { x: s2.x + 30, y: fan.worldY + 40, button: 0, pointerId: 42 });
+    await wait(60);
+    engine.captures.clear();
+    ok('cancel: a release inside the fan flies the card home, nothing played',
+      played.length === 1 && fan.cards.length === 4 && stayCard.x === home.x && stayCard.y === home.y);
+
+    // ---- Escape cancels a live drag (B7) ----
+    stayCard.dispatch('pointerdown', { x: s2.x, y: s2.y, button: 0, pointerId: 43 });
+    engine.bus.emit('pointermove', { x: s2.x + 40, y: s2.y - 60, pointerId: 43 });
+    ok('escape: the gesture is live mid-drag', fan._gesture !== null && fan._gesture.dragging === true);
+    engine.bus.emit('keydown', { key: 'Escape' });
+    await wait(40);
+    engine.captures.clear();
+    ok('escape: Escape cancels the drag and the card returns',
+      fan._gesture === null && stayCard.x === home.x && stayCard.y === home.y);
+
+    // ---- C3: one gesture, one pointer — the second finger is deaf ----
+    stayCard.dispatch('pointerdown', { x: s2.x, y: s2.y, button: 0, pointerId: 44 });
+    const other = fan.cards[1];
+    other.dispatch('pointerdown', { x: other.worldX + 10, y: other.worldY + 10, button: 0, pointerId: 45 });
+    ok('c3: the second press could not steal the gesture',
+      fan._gesture !== null && fan._gesture.card === stayCard && fan._gesture.pointerId === 44);
+    engine.bus.emit('pointerup', { x: s2.x, y: s2.y, button: 0, pointerId: 44 });
+    await wait(40);
+    engine.captures.clear();
+
+    // ---- the poor cannot pay: the handler declines, the fan bounces ----
+    const richCost = fan.cards.find((c) => c.id === 'witchflame');
+    const s3 = { x: richCost.worldX + richCost.w / 2, y: richCost.worldY + 20 };
+    richCost.dispatch('pointerdown', { x: s3.x, y: s3.y, button: 0, pointerId: 46 });
+    engine.bus.emit('pointermove', { x: dropAt.x, y: dropAt.y, pointerId: 46 });
+    engine.bus.emit('pointerup', { x: dropAt.x, y: dropAt.y, button: 0, pointerId: 46 });
+    await wait(60);
+    engine.captures.clear();
+    ok('refuse: an unaffordable play bounces home unclaimed (energy 1 < cost 2)',
+      played.length === 1 && fan.cards.includes(richCost) && state.energy === 1);
+
+    // ---- THE AIM LAW: a targeted Harm released over open board lands
+    // on the NEAREST foe — valid foes glow faint mid-drag, the aimed one locks
+    // bright, the lock re-seats as the card crosses the board, and the chrome
+    // stands down on release ----
+    const grip2 = new Card(DECK[1]);
+    fan.addCard(grip2, { animate: false });
+    state.energy = 3; refreshAffordance();
+    const boardDrop = { x: 170, y: fan.worldY - 40 };
+    // the pin derives its own nearest from plate geometry — never the widget's oracle
+    const byDist = (pt) => living().map((e) => ({
+      e, d: Math.hypot(e.plate.worldX + e.plate.w / 2 - pt.x, e.plate.worldY + e.plate.h / 2 - pt.y),
+    })).sort((a, b) => a.d - b.d);
+    const near1 = byDist(boardDrop)[0].e;
+    const other1 = byDist(boardDrop)[1].e;
+    const nearHp = near1.hp;
+    const playedN = played.length;
+    const s3b = { x: grip2.worldX + grip2.w / 2, y: grip2.worldY + 20 };
+    grip2.dispatch('pointerdown', { x: s3b.x, y: s3b.y, button: 0, pointerId: 48 });
+    engine.bus.emit('pointermove', { x: boardDrop.x, y: boardDrop.y, pointerId: 48 });
+    ok('aim: mid-drag the nearest foe locks bright and the other valid foes glow faint',
+      near1.aimFilm.fxOpacity === AIM_LOCK && other1.aimFilm.fxOpacity === AIM_VALID);
+    const secondAt = { x: other1.plate.worldX + other1.plate.w / 2, y: other1.plate.worldY + other1.plate.h + 30 };
+    engine.bus.emit('pointermove', { x: secondAt.x, y: secondAt.y, pointerId: 48 });
+    ok('aim: crossing the board re-seats the lock and narrates the change',
+      other1.aimFilm.fxOpacity === AIM_LOCK && near1.aimFilm.fxOpacity === AIM_VALID
+      && aims[aims.length - 1] === other1.name);
+    engine.bus.emit('pointermove', { x: boardDrop.x, y: boardDrop.y, pointerId: 48 });
+    engine.bus.emit('pointerup', { x: boardDrop.x, y: boardDrop.y, button: 0, pointerId: 48 });
+    await wait(60);
+    engine.captures.clear();
+    ok('aim: the release lands the harm on the AIMED nearest foe and pays the energy',
+      played.length === playedN + 1 && played[played.length - 1].onto === near1.plate
+      && near1.hp === nearHp - 3 && state.energy === 1 && !fan.cards.includes(grip2));
+    ok('aim: the drag chrome stands down after the release',
+      enemies.every((e) => e.aimFilm.fxOpacity === 0));
+
+    // ---- the board play: a Rite over open table raises ward, and lights NO foe ----
+    const freeCard = fan.cards.find((c) => c.id === 'lantern-oath');
+    const s4 = { x: freeCard.worldX + freeCard.w / 2, y: freeCard.worldY + 20 };
+    const boardAt = { x: 170, y: fan.worldY - 40 };
+    freeCard.dispatch('pointerdown', { x: s4.x, y: s4.y, button: 0, pointerId: 47 });
+    engine.bus.emit('pointermove', { x: boardAt.x, y: boardAt.y, pointerId: 47 });
+    ok('aim: a targetless Rite registers no targets and lights no foe mid-drag',
+      fan._targets.length === 0 && enemies.every((e) => e.aimFilm.fxOpacity === 0));
+    engine.bus.emit('pointerup', { x: boardAt.x, y: boardAt.y, button: 0, pointerId: 47 });
+    await wait(60);
+    engine.captures.clear();
+    ok('board: an open-table Rite plays with onto null and RAISES WARD',
+      played.length === playedN + 2 && played[played.length - 1].id === 'lantern-oath'
+      && played[played.length - 1].onto === null
+      && state.ward === 2 && wardChip.value === 2);
+
+    // ---- the answer: End Turn resolves the telegraphs through the ward ----
+    const wardBefore = state.ward, hpB4 = state.hp;
+    const intents = living().map((e) => ({ ...e.intent }));
+    let expWard = wardBefore, expHp = hpB4, expHeals = 0;
+    for (const it of intents) {
+      if (it.kind === 'attack') {
+        const soak = Math.min(expWard, it.value);
+        expWard -= soak; expHp -= (it.value - soak);
+      } else expHeals += 1;
+    }
+    const turnBefore = state.turn;
+    endTurn();
+    await wait(60);
+    ok('soak: the telegraphs resolved through the ward exactly'
+      + ` [live hp=${state.hp} ward=${state.ward} exp=${expHp}/${expWard}]`,
+      state.hp === expHp && state.ward === expWard);
+    ok('intents: a fresh telegraph rolled for every living foe',
+      state.turn === turnBefore + 1 && living().every((e) => e.itext._text !== ''));
+    ok('cycle: End Turn refills the hand to five and resets energy',
+      fan.cards.length === 5 && state.energy === 3);
+
+    // ---- conservation across discard/draw/reshuffle ----
+    state.hp = 30; refreshVitals(); // headroom: the cycle loop takes more hits
+    const inPlay = () => fan.cards.length + drawPile.count + discardPile.count;
+    const total0 = inPlay();
+    let sawReshuffle = false;
+    for (let t = 0; t < 3; t++) {
+      const drawBefore = drawPile.count;
+      const discardBefore = discardPile.count;
+      endTurn();
+      await wait(30);
+      if (discardBefore > 0 && drawBefore < 5 && discardPile.count < discardBefore) sawReshuffle = true;
+    }
+    ok('cycle: the deck total is conserved and the empty mound turned over',
+      sawReshuffle && inPlay() === total0);
+
+    // ---- the browse window mirrors the mound; chrome occludes the board (C10) ----
+    state.hp = 30; refreshVitals();
+    const n0 = drawPile.count;
+    drawPile._toggleBrowse();
+    await wait(60);
+    const bwin = drawPile._win;
+    const shown = bwin ? bwin.contentArea.content.children.filter((c) => c instanceof Card).length : 0;
+    ok('browse: the window shows every card in the mound', bwin != null && shown === n0);
+    // The FIT is the property (`shown === 12 && h < 900` passed a 790px
+ // window on a 665px screen for a whole release — it measured the cap someone
+ // chose, not the room the cap exists to guarantee). A browse taller or wider
+    // than the viewport, or parked off any edge, flips this whatever the cap says.
+    ok('browse: the window fits the viewport and stands fully on-screen',
+      bwin != null && bwin.w <= engine.width && bwin.h <= engine.height
+      && bwin.worldX >= 0 && bwin.worldY >= 0
+      && bwin.worldX + bwin.w <= engine.width && bwin.worldY + bwin.h <= engine.height);
+    // C10 on the page: a drag released over the browse window CANCELS, never sees
+    // through. The probe card must be one whose play is UNCONDITIONAL — the old
+    // form dragged 'drowning-grip', a TARGETED Harm the handler bounces on open
+    // board regardless, so it passed whether or not chrome-cancel worked. A ward
+    // Rite plays anywhere: if the window were see-through the play would land
+    // (energy drops, a played entry appears) and the first assert flips; the
+    // second assert proves the same card DOES play once the chrome is gone, so a
+    // fan that quietly refused every play cannot fake the first.
+    const c10card = new Card(DECK[2]); // pale-ward: cost 1, targetless
+    fan.addCard(c10card, { animate: false });
+    state.energy = 3;
+    refreshAffordance();
+    const c10home = { x: c10card.x, y: c10card.y };
+    const wardB4 = state.ward;
+    const energyB4 = state.energy;
+    const playedB4 = played.length;
+    const cs = { x: c10card.worldX + c10card.w / 2, y: c10card.worldY + 20 };
+    const winAt = { x: bwin.worldX + Math.min(60, bwin.w / 2), y: bwin.worldY + Math.min(60, bwin.h / 2) };
+    c10card.dispatch('pointerdown', { x: cs.x, y: cs.y, button: 0, pointerId: 49 });
+    engine.bus.emit('pointermove', { x: winAt.x, y: winAt.y, pointerId: 49 });
+    engine.bus.emit('pointerup', { x: winAt.x, y: winAt.y, button: 0, pointerId: 49 });
+    await wait(60);
+    engine.captures.clear();
+    ok('c10: a targetless ward released over the browse window cancels home — no energy, no play',
+      played.length === playedB4 && state.energy === energyB4 && state.ward === wardB4
+      && fan.cards.includes(c10card)
+      && c10card.x === c10home.x && c10card.y === c10home.y);
+    drawPile.closeBrowse();
+    await wait(40);
+    ok('browse: closing tears the window down', drawPile._win === null);
+    // the pair's other half: the SAME card over open board (a point the targeted-
+    // harm probe above proved plate-free) — distinguishes chrome-cancel from a
+    // fan or handler that refuses everything
+    const cs2 = { x: c10card.worldX + c10card.w / 2, y: c10card.worldY + 20 };
+    const boardAt2 = { x: 170, y: fan.worldY - 40 };
+    c10card.dispatch('pointerdown', { x: cs2.x, y: cs2.y, button: 0, pointerId: 50 });
+    engine.bus.emit('pointermove', { x: boardAt2.x, y: boardAt2.y, pointerId: 50 });
+    engine.bus.emit('pointerup', { x: boardAt2.x, y: boardAt2.y, button: 0, pointerId: 50 });
+    await wait(60);
+    engine.captures.clear();
+    ok('c10: the same drop with the chrome gone PLAYS — the cancel was occlusion, not refusal',
+      played.length === playedB4 + 1 && played[played.length - 1].id === 'pale-ward'
+      && played[played.length - 1].onto === null && state.energy === energyB4 - 1
+      && state.ward === wardB4 + 3 && !fan.cards.includes(c10card));
+
+    // ---- the construction budget: cards and a full reseed bake NOTHING ----
+    const t0 = engine.textures.count;
+    const batch = DECK.slice(0, 6).map((d) => new Card(d));
+    seedEnemies(1);
+    ok('budget: six cards + a full enemy reseed cost zero atlas textures',
+      engine.textures.count === t0);
+    for (const c of batch) c.dispose();
+
+    // ---- the floater pool never allocates mid-fight ----
+    for (let i = 0; i < 20; i++) floats.spawn(`${i}`, 400 + i * 8, 300);
+    ok('pool: twenty spawns into a pool of twelve hold the cap', floats.liveCount <= 12);
+
+    // ---- the NaN laws ----
+    const nanCard = new Card({ id: 'x', cost: NaN, rarity: 'mythic' });
+    ok('nan: Card cost guards to 0 and an unknown rarity reads common',
+      nanCard.cost === 0 && nanCard.rarity === 'common');
+    nanCard.dispose();
+    const nanFan = new HandFan({ maxWidth: NaN, lift: NaN });
+    ok('nan: HandFan budget options guard to defaults', nanFan.maxWidth === 560 && nanFan.lift === 20);
+    nanFan.dispose();
+    const nanPile = new Pile({ cards: 'not-an-array' });
+    nanPile.setCards(null);
+    ok('nan: Pile survives non-array decks as empty', nanPile.count === 0);
+    nanPile.dispose();
+
+    // ---- hit-reach: the REAL hit probe answers for the primary interactives ----
+    await wait(80); // the anchor layer seats the reseeded plates on its frame tick
+    const reach = (n) => {
+      const h = hitTest(engine, n.worldX + n.w / 2, n.worldY + n.h / 2);
+      return h === n || (n.isAncestorOf ? n.isAncestorOf(h) : false);
+    };
+    ok('hit-reach: End Turn answers the probe', reach(endBtn));
+    ok('hit-reach: a resting hand card and both mounds answer the probe',
+      reach(fan.cards[0]) && reach(drawPile) && reach(discardPile));
+    ok('hit-reach: an enemy plate answers the probe (the background layer receives)',
+      reach(living()[0].plate));
+
+    // ---- the arc: lethal, victory, the claim, the descent to floor two ----
+    const before = living().length;
+    window.__deck.damage(living()[0], 999);
+    ok('lethal: the slain foe leaves the table and the targets shrink',
+      living().length === before - 1 && fan._targets.length === before - 1);
+    for (const e of [...living()]) window.__deck.damage(e, 999);
+    await wait(60);
+    ok('victory: the cleared table raises the reward pick',
+      state.phase === 'reward' && rewardRow !== null);
+    const drawBeforeReward = drawPile.count;
+    const rewardCards = rewardRow.children.filter((c) => c instanceof Card);
+    ok('reward: three relics rise', rewardCards.length === 3);
+    // the instrument gap, closed for the one dialog this suite raises: the claim
+    // below is a dispatch, and dispatch bypasses hit testing — so before it fires,
+    // the REAL probe must land on the relic. A scrim left up, a mis-layered row,
+    // or a card buried under later chrome passes the dispatch and flips this.
+    const relic = rewardCards[1];
+    ok('hit-reach: the offered relic answers the real probe before its claim',
+      (() => {
+        const h = hitTest(engine, relic.worldX + relic.w / 2, relic.worldY + relic.h / 2);
+        return h === relic || (relic.isAncestorOf ? relic.isAncestorOf(h) : false);
+      })());
+    rewardCards[1].dispatch('click', {});
+    await wait(40);
+    ok('reward: the claim joins the mound and the map phase opens',
+      rewardRow === null && drawPile.count === drawBeforeReward + 1 && state.phase === 'map');
+
+    // ---- the run map: reachability, loud advance, and the NEXT FIGHT seeding ----
+    const advances = [];
+    runMap.on('advance', (e) => advances.push(e.id));
+    ok('map: the position holds the test suite and its forward doors stand open',
+      runMap.position === 'gate'
+      && runMap.getState('fight-a') === 'available'
+      && runMap.getState('market') === 'available'
+      && runMap.getState('omen') === 'locked'
+      && runMap.getState('depths') === 'locked');
+    runMap._plates.get('depths').dispatch('click', {});
+    ok('map: a locked door refuses the climb', runMap.position === 'gate' && advances.length === 0);
+    runMap._plates.get('market').dispatch('click', {});
+    await wait(60);
+    ok('map: an open door advances loud and re-derives the floor above',
+      advances.join(',') === 'market' && runMap.position === 'market'
+      && runMap.getState('depths') === 'available'
+      && runMap.getState('warden') === 'locked');
+    ok('map: the traveled path wears the gilt and the ring marks the stand',
+      runMap.visited.has('gate') && runMap.getState('gate') === 'owned'
+      && runMap._plates.get('gate').bg.material.map === Eldritch.engine.textures.get('graphnode.maxed')
+      && runMap._plates.get('market').ring.visible === true);
+    ok('descent: the advance seeded floor one-and-a-third harder and dealt a fresh hand',
+      state.phase === 'fight' && living().length === 3
+      && living()[0].hpMax === Math.round(8 * 1.35)
+      && fan.cards.length === 5 && state.energy === 3);
+
+    // the ground circle: right-click on the table opens the wheel, and
+    // the nested Piles>Deck pick opens the browse through the pile's own
+    // activation (a second activation closes it — the shipped browse law)
+    {
+      const w0 = engine.layers.windows.children.length;
+      engine.bus.emit('pointerdown', { x: 640, y: 200, button: 2, pointerId: 97, target: null, native: null });
+      await wait(60);
+      ok('ground: a right-click on the table opens the wheel', ground.isOpen === true);
+      ground._setIndex(1, false); // Piles
+      ground.onActivate();
+      await wait(40);
+      ground._setIndex(0, false); // Deck
+      ground.onActivate();
+      await wait(120);
+      ok('ground: the nested Deck pick opens the browse window',
+        ground.isOpen === false && engine.layers.windows.children.length === w0 + 1);
+      drawPile.onActivate(); // the second activation closes the browse
+      await wait(120);
+    }
+
+    // the last word: __errs was read once at t=400ms (the boot assert) and never
+    // again — a tween onDone throwing, a disposed-node write during the descent,
+    // any late console.error would otherwise leave the title green.
+    ok('close: no errors reached the console across the whole run', window.__errs.length === 0);
+
+    Eldritch.reducedMotion = false;
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;max-height:95vh;overflow:auto;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:10px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `DECKBUILDER ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+}
+</script>
+</body>
+</html>

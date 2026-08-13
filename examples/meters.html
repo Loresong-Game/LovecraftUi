@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Meters</title>
+<!-- @demo   Meters & Measures: a wall of live instruments on one fake ticker, and the hand-operated ones beside it.
+     @shows  SegmentedBar, ArcGauge, Badge, attachBadge, ResourceChip, ResourceBar, BigTimer, StarRating, SegmentedControl, SpeedControl, RadialMenu, EldWindow, Button, TextNode, UINode
+     @params ?freeze=1 — bit-stable snapshot boot (the wall holds its breath) · ?assert=1 — the in-page suite titles its own PASS count -->
+
+<!-- the proof page. The Wall's instruments all read one fake game ticker:
+     stamina breathes through the ArcGauge's thresholds, armor pips drain and refill
+     on the SegmentedBar, the ResourceBar's chips flash their deltas, the BigTimer
+     runs down (and re-arms on timeout), and a Badge counts unread omens on a stone
+     satchel. The Hand holds the operated ones: StarRating, a SegmentedControl, and
+     the SpeedControl preset that actually drives the ticker's tempo. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import {
+  Eldritch, EldWindow,
+  SegmentedBar, ArcGauge, Badge, attachBadge, ResourceChip, ResourceBar,
+  BigTimer, StarRating, SegmentedControl, SpeedControl, RadialMenu,
+  Button, UINode, TextNode, NineSliceNode,
+  runAudit, hitTest, COLORS, FONTS,
+} from '../src/lovecraft-ui.js';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+// L12: the ?uiscale= hook — the couch-distance baseline set shoots through it
+const UISCALE = Number(params.get('uiscale'));
+const SCALE_OPT = Number.isFinite(UISCALE) && UISCALE > 0 ? { uiScale: UISCALE } : {};
+const ASSERT = params.has('assert');
+// the census boots must see the RESTING wall — with fills SWEEPING, a
+// live ticker at census time reads a boundary cell mid-tween
+const INSTRUMENTED = FROZEN || ASSERT
+  || params.has('audit') || params.has('torture') || params.has('resize');
+Eldritch.init(FROZEN || ASSERT
+  ? { ...SCALE_OPT, background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { ...SCALE_OPT, contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+
+// ---- the icon pack (optional download): the RE-SKIN idiom ----
+// `as:` points at icon ids this page ALREADY uses, so the registry re-bakes those NAMES
+// in place: every live quad follows with no page code and no atlas movement.
+// `fallback: 'none'` leaves the procedural art standing when assets/ is absent, which is
+// the shipped default - the pack is an optional download and the page must not need it.
+// Skipped under FROZEN: --screenshot captures at the load event and cannot wait for an
+// async decode, so frozen baselines run on the procedural art by necessity.
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-3649', as: 'book' },
+      { id: 'ico-0210', as: 'shield' },
+      { id: 'ico-0513', as: 'sword' },
+      { id: 'ico-0489', as: 'blindinglight' },
+      { id: 'ico-0707', as: 'arrows' },
+      { id: 'ico-0307', as: 'leafs' },
+      { id: 'ico-0394', as: 'deathkiss' },
+      { id: 'ico-0017', as: 'fireball' },
+      { id: 'ico-0078', as: 'fireball2' },
+    ],
+  });
+}
+
+window.engine = engine;
+
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+let tempo = 1; // the SpeedControl drives this
+let wall = null; // instrument handles, hoisted for the tick and the suite
+let hand = null;
+
+// ---- The Wall: every instrument on one fake ticker ----
+EldWindow.create({
+  id: 'wall', title: 'Meters and Gauges', x: 30, y: 56, width: 520, height: 430, minWidth: 460, minHeight: 380,
+  content: (c) => {
+    const cap = (t, x, y) => {
+      const n = new TextNode(t, { size: 11, color: COLORS.textFaint, shadow });
+      n.setPos(x, y);
+      c.add(n);
+    };
+
+    cap('Wind in the lungs', 10, 6);
+    const gauge = new ArcGauge({ value: 80, max: 100, radius: 40, label: 'STAMINA' });
+    gauge.setPos(10, 24);
+    c.add(gauge);
+
+    cap('Hull plating', 130, 30);
+    const armor = new SegmentedBar({ segments: 6, max: 6, value: 6, width: 240, height: 20 });
+    armor.setPos(130, 48);
+    c.add(armor);
+
+    cap('The warding phases', 130, 80);
+    const phases = new SegmentedBar({
+      segments: 3, max: 3, value: 3, width: 240, height: 16,
+      tints: [COLORS.accent, COLORS.quest, COLORS.negative],
+    });
+    phases.setPos(130, 96);
+    c.add(phases);
+
+    cap('Stores aboard', 10, 130);
+    const resources = new ResourceBar({ chips: [
+      { icon: 'book', value: 120, cap: 999, width: 104 },
+      { icon: 'leafs', value: 34, cap: 100, warnAt: 15, width: 104 },
+      { icon: 'deathkiss', value: 7, cap: 50, warnAt: 5, width: 96 },
+    ], gap: 10 });
+    resources.setPos(10, 148);
+    c.add(resources);
+
+    cap('Lamp oil', 360, 130);
+    const shards = new ResourceChip({ icon: 'fireball', value: 3, cap: 9, warnAt: 1, width: 84 });
+    shards.setPos(360, 148);
+    c.add(shards);
+
+    cap('Until the turn of the watch', 10, 194);
+    // the timer runs on its OWN clock — a widget-internal ambient (the class):
+    // it boots paused under FROZEN/ASSERT so the baseline and the suite hold still
+    const timer = new BigTimer({ seconds: 45, warnAt: 20, urgentAt: 8, size: 30, running: !INSTRUMENTED });
+    timer.setPos(10, 212);
+    c.add(timer);
+    timer.on('timeout', () => { timer.setValue(45); timer.start(); });
+
+    cap('Unread omens', 150, 194);
+    const satchel = new UINode({ interactive: true });
+    const satchelArt = new NineSliceNode(engine.textures.frame('panel.dark'));
+    satchelArt.setRect(0, 0, 64, 48);
+    const satchelRune = new TextNode('✉', { size: 20, color: COLORS.textMuted, shadow });
+    satchelRune.setPos(22, 12);
+    satchel.add(satchelArt, satchelRune);
+    satchel.setRect(150, 214, 64, 48);
+    c.add(satchel);
+    const omens = attachBadge(satchel, { count: 2 });
+    const read = new Button('Read One', { minWidth: 110 });
+    read.setPos(230, 218);
+    read.on('click', () => omens.setCount(Math.max(0, omens.count - 1)));
+    c.add(read);
+    const receive = new Button('Omen Arrives', { minWidth: 130 });
+    receive.setPos(230, 262);
+    receive.on('click', () => omens.setCount(omens.count + 1));
+    c.add(receive);
+
+    cap('Every dial above reads the same watch clock. The Hand sets its tempo.', 10, 330);
+    wall = { gauge, armor, phases, resources, shards, timer, omens, read, receive, satchel };
+  },
+});
+
+// ---- the fake game (hoisted: the ambient rule — it boots cold under
+// FROZEN/ASSERT and the suite clocks it by hand through the same function) ----
+let t = 0, armorDir = -1, armorAcc = 0, resAcc = 0;
+const wallTick = (dt) => {
+  const d = dt * tempo;
+  if (tempo === 0) return;
+  t += d;
+  wall.gauge.setValue(50 + Math.sin(t * 0.9) * 48);
+  armorAcc += d;
+  if (armorAcc > 1.4) {
+    armorAcc = 0;
+    const next = wall.armor.value + armorDir;
+    wall.armor.setValue(next);
+    if (next <= 0 || next >= 6) armorDir = -armorDir;
+    wall.phases.setValue(Math.ceil((wall.armor.value / 6) * 3));
+  }
+  resAcc += d;
+  if (resAcc > 2.2) {
+    resAcc = 0;
+    const c0 = wall.resources.chips[1];
+    c0.setValue(Math.max(0, Math.min(100, c0.value + (Math.random() > 0.5 ? 9 : -12))));
+    wall.shards.setValue(Math.max(0, Math.min(9, wall.shards.value + (Math.random() > 0.6 ? 1 : -1))));
+  }
+};
+engine.ticker.add((dt) => { if (!INSTRUMENTED && wall) wallTick(dt); });
+
+// ---- The Hand: the operated instruments ----
+// 240 tall, not 300: the tempo row bottoms near ~180 and the chrome eats ~60 —
+// the last fifth of the window was dead stone (band sweep).
+// minHeight follows down: a floor above the created height is incoherent, and
+// 200 still leaves every shrink landing on REAL rows (no phantom range).
+EldWindow.create({
+  id: 'hand16', title: 'The Hand', x: 570, y: 56, width: 380, height: 240, minWidth: 340, minHeight: 200,
+  content: (c) => {
+    const cap = (t, x, y) => {
+      const n = new TextNode(t, { size: 11, color: COLORS.textFaint, shadow });
+      n.setPos(x, y);
+      c.add(n);
+    };
+
+    cap('How the last crossing went', 10, 6);
+    const stars = new StarRating({ value: 3 });
+    stars.setPos(10, 22);
+    c.add(stars);
+
+    cap('Standing orders', 10, 62);
+    const stance = new SegmentedControl({
+      options: [{ label: 'Ward', value: 'ward' }, { label: 'Fair', value: 'fair' }, { label: 'Reckless', value: 'wild' }],
+      width: 320,
+    });
+    stance.setPos(10, 80);
+    c.add(stance);
+
+    cap('The tempo of the watch', 10, 128);
+    const speed = SpeedControl({ value: 1, onChange: (v) => { tempo = v; } });
+    speed.setPos(10, 146);
+    c.add(speed);
+    hand = { stars, stance, speed };
+  },
+});
+
+// ---- the ground circle: right-click on the watch floor opens the
+// wheel — the omen verbs ride the Wall's own buttons, the tempo ring drives
+// the Hand's SpeedControl loud (the same control the suite proves is HEARD).
+// The page's FIRST handle bag rides along (drive-visible names).
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'omens', label: 'Omens', children: [
+ { id: 'read', label: 'Read One' },
+ { id: 'arrives', label: 'Arrives' },
+ ] },
+ { id: 'tempo', label: 'Tempo', children: [
+ { id: 'pause', label: 'Pause' },
+ { id: 'full', label: 'Full' },
+ ] },
+ ],
+});
+ground.on('select', ({ id, path }) => {
+  if (path[0] === 'omens') (id === 'read' ? wall.read : wall.receive).dispatch('click', {});
+  else if (path[0] === 'tempo') hand.speed.setValue(id === 'pause' ? 0 : 1, { silent: false });
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+window.__meters = { ground: () => ground, wall: () => wall, hand: () => hand };
+
+// ---- ?assert=1: the in-page suite (the wall clocked by hand) ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    await wait(600);
+
+    const audit = runAudit(engine);
+    const cts = audit.counts;
+    const v0 = audit.violations[0];
+    ok(`the page audits clean on every rule${v0 ? ` [${v0.rule} ${v0.path} ${v0.detail ?? ''}]` : ''}`,
+      Object.values(cts).reduce((a, b) => a + b, 0) === 0);
+
+    // one hand-clocked tick moves the gauge and steps the armor (1.5s stays
+    // below the 2.2s resource jitter — the only random path never runs).
+    // Derive, never mirror: `armor === 5` restated the boot config plus one step
+    // (config drift re-arms it silently), and `phases === 3` was strictly vacuous —
+    // constructed at 3 AND recomputing to 3. Capture armor before the tick, then
+    // hold the page's own phase formula to the armor value it actually read.
+    const g0 = wall.gauge.value;
+    const arm0 = wall.armor.value;
+    const ph0 = wall.phases.value;
+    // TWO ticks, and the phase must MOVE: one tick lands armor at 5 and
+    // ceil(5/6*3) = 3 — the phase line's own BOOT value, so the old single-tick
+    // arm stayed green with the page's phase line deleted (the audit's
+    // self-mirror class). Armor 6→5→4 forces the formula 3→3→2.
+    wallTick(1.5);
+    await wait(80);
+    wallTick(1.5);
+    await wait(80);
+    ok('a hand-clocked tick moves the wall AND the phase line follows armor down',
+      wall.gauge.value !== g0 && wall.armor.value === arm0 - 2
+      && wall.phases.value === Math.ceil((wall.armor.value / 6) * 3)
+      && wall.phases.value !== ph0);
+
+    // tempo zero holds the wall's breath
+    tempo = 0;
+    const a0 = wall.armor.value;
+    wallTick(3);
+    await wait(80);
+    tempo = 1;
+    ok('tempo zero holds the wall\'s breath', wall.armor.value === a0);
+
+    // the omens count through their buttons and the badge hides at zero
+    wall.receive.dispatch('click', {});
+    await wait(60);
+    const grew = wall.omens.count === 3;
+    wall.read.dispatch('click', {});
+    wall.read.dispatch('click', {});
+    wall.read.dispatch('click', {});
+    await wait(60);
+    ok('the omens count and the badge hides at zero',
+      grew && wall.omens.count === 0 && wall.omens.visible === false);
+
+    // the satchel that carries the badge is this wall's one bespoke interactive
+    // control: prove the REAL pointer path reaches it (dispatch bypasses hit
+    // testing — the instrument gap)
+    const sc = wall.satchel;
+    const sHit = hitTest(engine,
+      sc.worldX + (sc.w * (sc.worldScale || 1)) / 2,
+      sc.worldY + (sc.h * (sc.worldScale || 1)) / 2);
+    ok('hit-reach: the omen satchel answers the real hit probe',
+      sHit === sc || (sc.isAncestorOf ? sc.isAncestorOf(sHit) : false));
+
+    // the parked timer runs when started
+    const t0 = wall.timer.value ?? 45;
+    wall.timer.start();
+    await wait(1300);
+    ok('the parked timer runs when started', (wall.timer.value ?? 45) < t0);
+
+    // the operated instruments answer loud commits — HEARD loud: the old
+    // arm had no listener anywhere, so {silent:true} passed identically; the
+    // change events are the property the flag exists to guarantee
+    const loud285 = [];
+    const offStars285 = hand.stars.on('change', (e) => loud285.push('stars:' + e.value));
+    const offStance285 = hand.stance.on('change', (e) => loud285.push('stance:' + e.value));
+    hand.stars.setValue(5, { silent: false });
+    hand.stance.setValue('wild', { silent: false });
+    await wait(80);
+    offStars285(); offStance285();
+    // The Hand hugs its rows: no dead band past the breathing budget,
+    // no rail, no phantom range at rest
+    {
+      const hw = EldWindow.windows.find((w) => w.id === 'hand16');
+      const sa = hw.contentArea, slack = sa.boxH - sa.contentH;
+      ok(`the Hand hugs its instruments — no dead stone [boxH ${sa.boxH} contentH ${sa.contentH}]`,
+        sa.vBarVisible === false && sa.maxScroll === 0 && slack >= 0 && slack <= 24);
+    }
+    // the ground circle: right-click on the watch floor opens the wheel,
+    // and the nested Read One pick spends an omen through the Wall's own button
+    {
+      const omens0 = wall.omens.count;
+      engine.bus.emit('pointerdown', { x: 640, y: 620, button: 2, pointerId: 72, target: null, native: null });
+      await wait(60);
+      ok('ground: a right-click on the watch floor opens the wheel',
+        window.__meters.ground().isOpen === true);
+      window.__meters.ground()._setIndex(0, false); // Omens
+      window.__meters.ground().onActivate();
+      await wait(40);
+      window.__meters.ground()._setIndex(0, false); // Read One
+      window.__meters.ground().onActivate();
+      await wait(60);
+      ok('ground: the nested Read One pick spends an omen through the Wall\'s button',
+        window.__meters.ground().isOpen === false && wall.omens.count === Math.max(0, omens0 - 1));
+    }
+    ok('the operated instruments answer loud commits — and are HEARD',
+      hand.stars.value === 5 && hand.stance.value === 'wild'
+      && loud285.join(',') === 'stars:5,stance:wild');
+
+    ok('the whole watch ran without a single page error', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `METERS ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+} else {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'METERS READY';
+  }, 1000);
+}
+</script>
+</body>
+</html>

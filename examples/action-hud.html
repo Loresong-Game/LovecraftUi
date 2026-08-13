@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Action HUD</title>
+<!-- @demo   The Lantern Bearer: a quay at night with a weapon wheel whose hit area IS the ring (corners and the hole fall through), a scripted boss with phases and an enrage clock, a draining stamina ring, a keycap belt, and five landmarks the anchor layer carries in and out of frame.
+     @shows  RadialMenu, BossBar, ArcGauge, CompassStrip, WorldAnchorLayer, OffscreenIndicator, InteractPrompt, InputPrompt, KeyGlyph, ActionBar, EldDragDrop, TitleCard, TextNode, UINode, QuadNode, NineSliceNode
+     @params ?freeze=1 — bit-stable snapshot boot (orbit parked, wheel closed, timer cold) · ?assert=1 — the in-page suite titles its own PASS count · ?torture=1 / ?audit=1 / ?resize=1 — the orbit parks for every census -->
+
+<!-- the proof page. Q (or the Wheel button) toggles the summoning circle:
+     hover or drag the left stick to pick a sector, click/Enter/gamepad-A selects,
+     Escape/B/outside-press dismisses — and a click in the wheel's corner or center
+     hole lands on the SCENE below, because the ring is the hit area (the
+     containsPoint override, the Spotlight precedent). The boss walks its phases on
+     a scripted clock, announces each with a TitleCard, and arms the enrage timer on
+     its last legs. Hold Shift to sprint the stamina ring dry. The world kit
+     (nameplates, edge markers, the hold-to-claim prompt) rides the same orbiting
+     night quay. Hold-open and nested rings fell per the cut line
+     (click-toggle ships; rings are).
+
+     the "Wheel" driver button is gone (Q, or right-click the scene), the
+     81-dot floor is a painted quay with wet stone underfoot, and the retired
+     world-hud is absorbed here - its landmarks, its keycap family and its
+     hold-to-claim prompt, minus the "Pretend Gamepad" button that faked a device
+     switch the engine already reports for real. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {
+  Eldritch, RadialMenu, BossBar, ArcGauge, CompassStrip, WorldAnchorLayer,
+  OffscreenIndicator, InteractPrompt, InputPrompt, KeyGlyph, ActionBar, EldDragDrop,
+  TitleCard, TextNode, UINode, QuadNode, NineSliceNode, COLORS, FONTS, hitTest,
+} from '../src/lovecraft-ui.js';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+// INSTRUMENTED (the arcade/meters idiom): every census boot reads a RESTING quay.
+const INSTRUMENTED = FROZEN || ASSERT
+  || params.has('audit') || params.has('torture') || params.has('resize');
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { contextMenu: false }); // right-click summons the wheel — the canvas owns its menu
+const engine = Eldritch.engine;
+
+// ---- the icon pack (optional download): the RE-SKIN idiom ----
+// `as:` points at icon ids this page ALREADY uses, so the registry re-bakes those NAMES
+// in place: every live quad follows with no page code and no atlas movement.
+// `fallback: 'none'` leaves the procedural art standing when assets/ is absent, which is
+// the shipped default - the pack is an optional download and the page must not need it.
+// Skipped under FROZEN: --screenshot captures at the load event and cannot wait for an
+// async decode, so frozen baselines run on the procedural art by necessity.
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-3649', as: 'book' },
+      { id: 'ico-0210', as: 'shield' },
+      { id: 'ico-0513', as: 'sword' },
+      { id: 'ico-0489', as: 'blindinglight' },
+      { id: 'ico-0707', as: 'arrows' },
+      { id: 'ico-0307', as: 'leafs' },
+      { id: 'ico-0394', as: 'deathkiss' },
+      { id: 'ico-0017', as: 'fireball' },
+      { id: 'ico-0078', as: 'fireball2' },
+    ],
+  });
+}
+
+window.engine = engine;
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+
+// ---- the view: a slow orbit over the quay, driving the projection ----
+let camA = 0.6;
+let orbitSpeed = INSTRUMENTED ? 0 : 0.12; // the ambient rule: motion parks for every census
+const CAM_R = 620, CAM_H = 260, FOV = 460;
+function project(x, y, z) {
+  const cx = Math.sin(camA) * CAM_R, cy = CAM_H, cz = Math.cos(camA) * CAM_R;
+  const fl = Math.hypot(cx, cy, cz);
+  const fx = -cx / fl, fy = -cy / fl, fz = -cz / fl;
+  const rl = Math.hypot(fz, fx) || 1;
+  const rx = fz / rl, rz = -fx / rl;
+  const ux = fy * rz, uy = fz * rx - fx * rz, uz = -fy * rx;
+  const dx = x - cx, dy = y - cy, dz = z - cz;
+  const depth = dx * fx + dy * fy + dz * fz;
+  const s = FOV / Math.max(24, depth);
+  return {
+    sx: engine.width / 2 + (dx * rx + dz * rz) * s,
+    sy: engine.height / 2 - (dx * ux + dy * uy + dz * uz) * s,
+    visible: depth > 24,
+    depth,
+  };
+}
+// ---- the quay at night: ONE page-owned canvas, painted on resize only ----
+// The far field does not need to swing with the orbit (the shooter-hud precedent -
+// its harbour night is static while the world plates move), so this costs one paint
+// per resize instead of one per frame, and zero atlas entries. What orbits is the
+// ground and everything the anchor layer carries, which is where the motion reads.
+const scene = new UINode({ name: 'the-quay' });
+const bdCanvas = document.createElement('canvas');
+const bdTex = new THREE.CanvasTexture(bdCanvas);
+bdTex.colorSpace = THREE.SRGBColorSpace;
+bdTex.minFilter = THREE.LinearFilter;
+bdTex.magFilter = THREE.LinearFilter;
+bdTex.generateMipmaps = false;
+const bdQuad = new QuadNode({ texture: bdTex });
+scene.add(bdQuad);
+engine.layers.background.add(scene);
+scene.on('dispose', () => bdTex.dispose());
+const srnd = (n) => { let s = n; return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff; };
+
+function paintQuay() {
+  const W = Math.max(2, Math.round(engine.width)), H = Math.max(2, Math.round(engine.height));
+  if (bdCanvas.width !== W || bdCanvas.height !== H) { bdCanvas.width = W; bdCanvas.height = H; }
+  const ctx = bdCanvas.getContext('2d');
+  const horizon = Math.round(H * 0.44);
+  ctx.clearRect(0, 0, W, H);
+
+  // sky, going from a bruised green at the horizon up into nothing
+  const sky = ctx.createLinearGradient(0, 0, 0, horizon);
+  sky.addColorStop(0, '#04070b');
+  sky.addColorStop(1, '#0d1a1c');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, horizon);
+
+  // the far town: a silhouette of roofs and one lit tower, seeded for bit-stability
+  const r = srnd(20261);
+  ctx.fillStyle = '#070c0e';
+  let tx = -20;
+  while (tx < W + 20) {
+    const tw = 26 + r() * 58, th = 16 + r() * 46;
+    ctx.fillRect(tx, horizon - th, tw, th);
+    if (r() > 0.72) {   // a window lit against the dark
+      ctx.fillStyle = 'rgba(232,216,106,0.30)';
+      ctx.fillRect(tx + tw * 0.35, horizon - th * 0.7, 3, 4);
+      ctx.fillStyle = '#070c0e';
+    }
+    tx += tw - 6;
+  }
+  // the bell tower, taller than the rest and lit at its crown
+  const btx = Math.round(W * 0.24);
+  ctx.fillStyle = '#060a0c';
+  ctx.fillRect(btx, horizon - 132, 40, 132);
+  ctx.fillStyle = 'rgba(232,216,106,0.5)';
+  ctx.fillRect(btx + 13, horizon - 118, 14, 18);
+
+  // the water: a dark band with the tower's reflection smeared down it
+  const sea = ctx.createLinearGradient(0, horizon, 0, H);
+  sea.addColorStop(0, '#081418');
+  sea.addColorStop(1, '#04080a');
+  ctx.fillStyle = sea;
+  ctx.fillRect(0, horizon, W, H - horizon);
+  ctx.fillStyle = 'rgba(232,216,106,0.055)';
+  ctx.fillRect(btx + 12, horizon, 16, Math.round(H * 0.16));
+  ctx.strokeStyle = 'rgba(140,190,170,0.05)';
+  ctx.lineWidth = 1;
+  const quayTop = Math.round(H * 0.72);
+  for (let i = 0; i < 22; i++) {
+    const y = horizon + 4 + r() * (quayTop - horizon - 8);
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    for (let x = 0; x <= W; x += 48) ctx.lineTo(x, y + Math.sin((x + i * 70) * 0.010) * 2);
+    ctx.stroke();
+  }
+
+  // THE QUAY you are standing on. Without it the projected ground marks read as
+  // debris floating in the harbour - the scene needs a floor before it can have a
+  // foreground, and the painted deck is what the flagstone glints then sit on.
+  ctx.fillStyle = '#0b100d';
+  ctx.fillRect(0, quayTop, W, H - quayTop);
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';       // the shadow the deck throws on the water
+  ctx.fillRect(0, quayTop - 5, W, 6);
+  ctx.strokeStyle = 'rgba(92,103,94,0.35)'; // the lit lip of the sea wall
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(0, quayTop + 1); ctx.lineTo(W, quayTop + 1); ctx.stroke();
+  // deck flags, widening toward the viewer so the boards read in perspective
+  ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < 26; i++) {
+    const t = i / 25;
+    const y = Math.round(quayTop + Math.pow(t, 1.7) * (H - quayTop));
+    ctx.beginPath(); ctx.moveTo(0, y + 0.5); ctx.lineTo(W, y + 0.5); ctx.stroke();
+  }
+  for (let i = -6; i < 18; i++) {
+    const xTop = W / 2 + (i - 5.5) * 44;
+    const xBot = W / 2 + (i - 5.5) * 132;
+    ctx.beginPath(); ctx.moveTo(xTop, quayTop); ctx.lineTo(xBot, H); ctx.stroke();
+  }
+  // two bollards on the sea wall, and the lantern pool between them
+  for (const bx of [Math.round(W * 0.18), Math.round(W * 0.82)]) {
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(bx - 8, quayTop - 20, 18, 24);
+    ctx.fillStyle = '#1d2320';
+    ctx.fillRect(bx - 10, quayTop - 22, 18, 24);
+  }
+  const pool = ctx.createRadialGradient(W / 2, quayTop + 60, 10, W / 2, quayTop + 60, W * 0.32);
+  pool.addColorStop(0, 'rgba(232,216,106,0.075)');
+  pool.addColorStop(1, 'rgba(232,216,106,0)');
+  ctx.fillStyle = pool;
+  ctx.fillRect(0, quayTop - 40, W, H - quayTop + 40);
+  bdTex.needsUpdate = true;
+}
+// `scene` stays ZERO-SIZED: the overlap rule compares a parent's audit-solid children
+// pairwise, and a full-screen wrapper beside `floor` and the anchor layer on the
+// background layer overlaps both (the strategy-hud measurement). Only the quad is sized.
+scene.onLayout = function () {
+  bdQuad.setRect(0, 0, engine.width, engine.height);
+  paintQuay();
+};
+
+// ---- the ground: wet flagstones under the lantern, re-projected as the view swings
+const floor = new UINode({ name: 'floor' });
+engine.layers.background.add(floor);
+const stoneTex = (() => {
+  const c = document.createElement('canvas');
+  const px = Math.max(1, Math.round(window.devicePixelRatio || 1));
+  c.width = 10 * px; c.height = 10 * px;
+  const g = c.getContext('2d');
+  g.scale(px, px);
+  // a soft wet glint, NOT a cross - the first pass drew a plus sign and the grid read
+  // as debris scattered over the harbour
+  const gr = g.createRadialGradient(5, 5, 0, 5, 5, 5);
+  gr.addColorStop(0, 'rgba(255,255,255,0.9)');
+  gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr;
+  g.fillRect(0, 0, 10, 10);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.minFilter = THREE.LinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  t.generateMipmaps = false;
+  return t;
+})();
+floor.on('dispose', () => stoneTex.dispose());
+const dots = [];
+for (let gx = -4; gx <= 4; gx++) {
+  for (let gz = -4; gz <= 4; gz++) {
+    // the joint between flagstones, catching what the lantern throws
+    const q = new QuadNode({ texture: stoneTex, color: COLORS.accent, opacity: 0.22 });
+    q.setSize(9, 9);
+    dots.push({ q, x: gx * 110, z: gz * 110 });
+    floor.add(q);
+  }
+}
+floor.setFrameHook((dt) => {
+  camA += orbitSpeed * dt;
+  // the glints only exist ON the painted deck: anything the projection puts above the
+  // sea wall would be floating in the harbour, which is exactly how the first pass read
+  const deckTop = engine.height * 0.72;
+  for (const d of dots) {
+    const p = project(d.x, 0, d.z);
+    d.q.visible = p.visible && p.sy > deckTop;
+    if (!d.q.visible) continue;
+    // near stones read brighter and larger: the depth cue the flat dot grid lacked
+    const near = Math.max(0, Math.min(1, 1 - (p.depth - 200) / 900));
+    const s = Math.round(6 + near * 12);
+    d.q.setSize(s, s);
+    d.q.setBaseOpacity(0.10 + near * 0.30);
+    d.q.setPos(Math.round(p.sx - s / 2), Math.round(p.sy - s / 2));
+  }
+});
+
+// ---- the world kit, wired ----
+const anchors = new WorldAnchorLayer({ project });
+engine.layers.background.add(anchors);
+function makePlate(name) {
+  const plate = new UINode();
+  const bg = new NineSliceNode(engine.textures.frame('tooltip.frame'));
+  const label = new TextNode(name, {
+    font: FONTS.header, size: 12, smallCaps: true, letterSpacing: 1,
+    color: COLORS.accent, shadow,
+  });
+  const w = Math.ceil(label.w) + 20;
+  plate.add(bg, label);
+  bg.setRect(0, 0, w, 26);
+  label.setPos(10, 6);
+  plate.setSize(w, 26);
+  return plate;
+}
+// The retired world-hud's three landmarks join the Warden's two: the anchor layer and
+// the edge markers are worth showing at a population where plates actually leave the
+// screen and come back.
+const LANDMARKS = [
+  { name: 'The Bell Tower', x: -360, y: 90, z: -240, icon: 'icon.blindinglight' },
+  { name: 'The Ferry Gate', x: 340, y: 90, z: 300, icon: 'icon.book' },
+  { name: 'The Drowned Stair', x: -340, y: 90, z: 300, icon: 'icon.deathkiss' },
+  { name: 'The Silent Bell', x: 400, y: 90, z: -220, icon: 'icon.shield' },
+  { name: 'The Last Lantern', x: 60, y: 90, z: 440, icon: 'icon.leafs' },
+];
+for (const lm of LANDMARKS) {
+  anchors.anchor(makePlate(lm.name), lm, { dy: -22, fadeWith: (t, p) => 1.15 - (p.depth ?? 0) / 1400 });
+  anchors.anchor(new OffscreenIndicator({ icon: lm.icon }), lm, { clampToEdge: true, edgeMargin: 26 });
+}
+let lanternRaised = 0; // the input replay reads completed rites through the bag
+const lantern = new InteractPrompt({
+  action: { key: 'E', pad: 'A' }, label: 'Raise the Lantern', hold: 0.8,
+  onConfirm: () => { lanternRaised++; TitleCard.show({ title: 'The Lantern Answers', hold: 1.2 }); },
+});
+anchors.anchor(lantern, { x: 30, y: 24, z: 140 }, { dy: -14 });
+// Eldritch.onKey, never window.addEventListener: `down` is deaf while a text field holds
+// focus, and `up` still fires for a key this registration saw go down, so a release that
+// lands after a click elsewhere clears the hold instead of stranding the lantern lit.
+Eldritch.onKey('e', { down: () => lantern.beginHold(), up: () => lantern.cancelHold() });
+
+// Page placement must CHAIN a widget's own onLayout, never clobber it (BossBar and
+// ArcGauge lay out their internals there — replacing it piles children at 0,0).
+const place = (node, fn) => {
+  const own = node.onLayout?.bind(node);
+  node.onLayout = function () { own?.(); fn.call(this); };
+};
+
+// ---- the compass (reused whole) ----
+const compass = new CompassStrip({
+  width: 360, heading: 40,
+  markers: [{ bearing: 20, color: COLORS.quest }, { bearing: 250, color: COLORS.negative }],
+});
+place(compass, function () { this.setPos(Math.round((engine.width - this.w) / 2), 14); });
+engine.layers.overlay.add(compass);
+
+// ---- the boss ----
+const boss = new BossBar({ name: 'The Harbor-Warden', phases: 3, width: 380 });
+place(boss, function () { this.setPos(Math.round((engine.width - this.w) / 2), 58); });
+engine.layers.overlay.add(boss);
+let enraged = false;
+boss.on('enrage', () => { enraged = true; });
+// the scripted fight: a deterministic clock on the engine ticker (parked under
+// FROZEN/ASSERT — the suite steps phases by hand)
+if (!FROZEN && !ASSERT) {
+  let fightT = 0;
+  engine.ticker.add((dt) => {
+    fightT += dt;
+    if (fightT > 8 && boss.phase === 3) { boss.setPhase(2, { silent: true }); wheel.setItemEnabled('flame', true); TitleCard.show({ title: 'The Warden Staggers', hold: 1.2 }); }
+    if (fightT > 16 && boss.phase === 2) { boss.setPhase(1, { silent: true }); boss.enrage(20); TitleCard.show({ title: 'It Will Not Drown Alone', hold: 1.4 }); }
+  });
+}
+
+// ---- the stamina ring (the ArcGauge recipe) ----
+const stamina = new ArcGauge({
+  value: 100, max: 100, radius: 34, thickness: 8, label: 'STAMINA',
+  thresholds: [
+    { pct: 0, color: COLORS.negative },
+    { pct: 0.3, color: COLORS.quest },
+    { pct: 0.6, color: COLORS.accent },
+  ],
+});
+place(stamina, function () { this.setPos(engine.width - 120, engine.height - 130); });
+engine.layers.overlay.add(stamina);
+let sprinting = false;
+let stam = 100;
+Eldritch.onKey('Shift', { down: () => { sprinting = true; }, up: () => { sprinting = false; } });
+if (!FROZEN && !ASSERT) {
+  engine.ticker.add((dt) => {
+    stam = Math.min(100, Math.max(0, stam + (sprinting ? -34 : 16) * dt));
+    stamina.setValue(stam, { silent: true, animate: false }); // drain snaps; regen reads smooth enough per-frame
+  });
+}
+
+// ---- the weapon wheel ----
+// The lantern is a PARENT sector (the nested-ring graduation): picking it
+// opens its states as a child ring — lit for the road, dark for the stalk — with
+// the Back sector the engine appends. Every other weapon stays a leaf.
+const wheel = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ rOut: 118, rIn: 46,
+ items: [
+ { id: 'lantern', icon: 'blindinglight', label: 'Lantern', children: [
+ { id: 'lit', label: 'Lit' },
+ { id: 'dark', label: 'Dark' },
+ ] },
+ { id: 'blade', icon: 'arrows', label: 'Blade' },
+ { id: 'ward', icon: 'shield', label: 'Ward' },
+ { id: 'grimoire', icon: 'book', label: 'Grimoire' },
+ // locked BY PLAY: the reason speaks on hover, and the Warden's stagger unseals it
+ { id: 'flame', icon: 'fireball', label: 'Flame', disabled: true,
+ reason: 'Sealed until the Warden staggers.' },
+ { id: 'kiss', icon: 'deathkiss', label: 'Last Kiss' },
+ ],
+});
+const wielded = new TextNode('Wielding: the road', { size: 13, color: COLORS.text, shadow });
+// centred just under the belt, where a player looks for what is in their hands
+place(wielded, function () { this.setPos(Math.round((engine.width - this.w) / 2), engine.height - 42); });
+engine.layers.overlay.add(wielded);
+// a nested pick names its whole path ('lantern (lit)'); a root pick reads as before
+wheel.on('select', ({ id, path }) => wielded.setText(
+  path.length > 1 ? `Wielding: ${path[0]} (${id})` : `Wielding: ${id}`));
+// the flame unseals at the stagger — through the scripted beat live, and through
+// the same verb the suite drives (a loud setPhase speaks 'change')
+boss.on('change', (e) => { if (e.value === 2) wheel.setItemEnabled('flame', true); });
+// the "Wheel" button is gone. A weapon wheel answers to the hand that
+// wants it - Q at the screen centre, or right-click wherever you are looking. Empty
+// scene only: a right-click that lands on a widget belongs to that widget, and the
+// bus reports the hit target, so this never steals a context menu from chrome.
+Eldritch.onKey('q', { down: () => wheel.toggle(engine.width / 2, engine.height / 2) });
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  wheel.toggle(e.x, e.y);
+});
+// the native menu is off CANVAS-WIDE via init({ contextMenu: false }) —
+// retired this page's window-level noMenu + pagehide dance (the engine listener
+// unwinds with the engine, so nothing leaks through an SPA remount)
+
+// ---- the input replay's handle bag (the seventh instrument): handles, never coordinates ----
+window.__action = {
+  wheel, boss, lantern, wielded,
+  stam: () => stam, sprinting: () => sprinting, raised: () => lanternRaised,
+  sharedOpen: () => engine.radialShared?.isOpen === true, // the chain's wheel
+  sharedFirst: () => engine.radialShared?.items?.[0]?.id ?? null,
+  slot0: () => beltSlots[0], // lazy: the belt declares below; drives resolve at call time
+  // the ONE sanctioned reach into TextNode's internal: a rename breaks this getter,
+  // and the input replay's boot-state expect on it goes red LOUDLY (the old script compared
+  // `_text !== '...'` raw — a rename made that true forever, a green that rots)
+  wieldedText: () => wielded._text,
+};
+
+// ---- the belt: ActionSlots wearing the keycap family (absorbed from the
+// retired world-hud, where three EMPTY slots and a "Pretend Gamepad" button were the
+// whole demonstration). Here they are the bearer's own kit, they fill the dead
+// bottom band, and one of them is the focus holder the wheel restores to.
+// ActionBar is the composite for this (game-hud's exact pattern) - it owns the slot
+// ids and the bar lock, so the page does not hand-roll a row of slots. world-hud's
+// version shipped three EMPTY slots; a bearer's belt should have things on it.
+const BELT = [
+  { key: 'Q', icon: 'blindinglight' },
+  { key: 'E', icon: 'book' },
+  { key: 'Shift', icon: 'arrows' },
+  { key: 'R', icon: 'shield' },
+];
+const belt = new ActionBar({ rows: 1, cols: BELT.length, lock: true });
+const beltSlots = belt.slots;
+BELT.forEach((b, i) => {
+  EldDragDrop.createIconInSlot(beltSlots[i], b.icon);
+  beltSlots[i].setKeybind(b.key);
+});
+place(belt, function () {
+  this.setPos(Math.round((engine.width - this.w) / 2), engine.height - 44 - this.h);
+});
+engine.layers.overlay.add(belt);
+// radial-chain demonstration: the belt is a provider — a right-click on a
+// slot offers that rite's own verbs through the shared wheel (// "radial on hotbar items"); the page circle stays the GROUND for the scene.
+belt.radialItems = (e) => {
+  const slot = e.target?.closest?.((n) => n.slotKind === 'action');
+  if (!slot || !EldDragDrop.getSlotIcon(slot)) return null;
+  return [
+    { id: 'invoke', label: 'Invoke', onSelect: () => EldDragDrop.triggerAction(slot) },
+    {
+      id: 'clear', label: 'Clear',
+      disabled: EldDragDrop.locked === true,
+      reason: EldDragDrop.locked === true ? 'The belt is pinned.' : undefined,
+      onSelect: () => EldDragDrop.clearSlot(slot),
+    },
+  ];
+};
+
+// ---- the control legend: the glyph family, shown as a legend rather than as a wall
+// of every glyph the library can draw. InputPrompt re-draws itself when the engine
+// notices a real gamepad (engine.noteDevice), so this is honest with no fake button:
+// plug a pad in and the row answers.
+const legend = new UINode({ name: 'legend' });
+const legendRows = [
+  new InputPrompt({ key: 'Q', pad: 'Y' }, 'The summoning circle'),
+  new InputPrompt({ key: 'E', pad: 'A' }, 'Raise the lantern (hold)'),
+  new InputPrompt({ key: 'Shift', pad: 'LB' }, 'Sprint'),
+];
+legendRows.forEach((row, i) => { row.setPos(0, i * 24); legend.add(row); });
+legend.setSize(240, legendRows.length * 24);
+const mouseHint = new UINode({ name: 'mouse-hint' });
+const rmbGlyph = new KeyGlyph({ mouse: 3 }, { size: 20 });
+const rmbText = new TextNode('Circle at the cursor', { size: 12, color: COLORS.textMuted, shadow });
+rmbGlyph.setPos(0, 0);
+rmbText.setPos(28, 3);
+mouseHint.add(rmbGlyph, rmbText);
+mouseHint.setSize(28 + Math.ceil(rmbText.w), 20);
+legend.add(mouseHint);
+mouseHint.setPos(0, legendRows.length * 24);
+legend.setSize(240, legendRows.length * 24 + 22);
+place(legend, function () { this.setPos(24, engine.height - this.h - 26); });
+engine.layers.overlay.add(legend);
+
+// ---- READY / ASSERT ----
+if (!ASSERT) {
+  setTimeout(() => {
+    document.title = window.__errs.length ? 'ACTIONHUD BOOT FAIL: ' + window.__errs[0] : 'ACTIONHUD READY';
+  }, 1000);
+} else {
+  (async () => {
+    const results = [];
+    let fails = 0;
+    const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    await wait(400); // settle the boot
+
+    const CX = Math.round(engine.width / 2), CY = Math.round(engine.height / 2);
+    const rMid = (wheel.rIn + wheel.rOut) / 2;
+    const atAngle = (deg, r) => ({
+      x: CX + Math.sin(deg * Math.PI / 180) * r,
+      y: CY - Math.cos(deg * Math.PI / 180) * r,
+    });
+
+    // the ring is the hit area: corners and the hole fall through, the ring hits
+    wheel.open(CX, CY, { silent: true });
+    await wait(80); // one layout+sync pass: worldX/worldY must land before geometry probes
+    ok('wheel: open() reports open and takes focus', wheel.isOpen === true && engine.focusedNode === wheel);
+    const corner = { x: CX - wheel.rOut + 4, y: CY - wheel.rOut + 4 };
+    ok('hit: the bounding-box corner is NOT inside (falls through)', wheel.containsPoint(corner.x, corner.y) === false);
+    ok('hit: the center hole is NOT inside (falls through)', wheel.containsPoint(CX, CY) === false);
+    const onRing = atAngle(0, rMid);
+    ok('hit: the ring itself IS inside', wheel.containsPoint(onRing.x, onRing.y) === true);
+
+    // sector accuracy at the boundaries (6 sectors, step 60, boundaries at +/-30)
+    ok('sector: dead top is sector 0', wheel._sectorAt(atAngle(0, rMid).x, atAngle(0, rMid).y) === 0);
+    ok('sector: 29.9 degrees stays sector 0', wheel._sectorAt(atAngle(29.9, rMid).x, atAngle(29.9, rMid).y) === 0);
+    ok('sector: 30.1 degrees crosses to sector 1', wheel._sectorAt(atAngle(30.1, rMid).x, atAngle(30.1, rMid).y) === 1);
+    ok('sector: 330.1 degrees wraps back to sector 0', wheel._sectorAt(atAngle(330.1, rMid).x, atAngle(330.1, rMid).y) === 0);
+    ok('sector: a hole point picks nothing', wheel._sectorAt(CX, CY) === -1);
+
+    // keyboard walk skips the disabled sector (index 4, 'flame')
+    engine.canvas.focus();
+    const walkFrom = wheel.index;
+    engine.canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    await wait(40);
+    ok('walk: ArrowRight moves the selection', wheel.index === (walkFrom + 1) % 6);
+    wheel._setIndex(3, false);
+    engine.canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    await wait(40);
+    ok('walk: the dead sector (flame) is skipped, 3 walks to 5', wheel.index === 5);
+
+    // selection commits and closes; the wielded line follows
+    const picks = [];
+    wheel.on('select', (e) => picks.push(e));
+    wheel.onActivate();
+    await wait(40);
+    ok('select: Enter/A commits {index:5, id:kiss} and closes',
+      picks.length === 1 && picks[0].id === 'kiss' && wheel.isOpen === false);
+    ok('select: the page listener heard it too', wielded._text === 'Wielding: kiss');
+
+    // Escape-stack integration: Escape closes, focus restores (C1). The holder is a
+    // real belt slot now - the "Wheel" driver button that used to sit here is gone.
+    engine.focus.set(beltSlots[0], 'api');
+    wheel.open(CX, CY, { silent: true });
+    ok('escape: reopening takes focus from the belt', engine.focusedNode === wheel);
+    engine.canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await wait(40);
+    ok('escape: Escape pops the stack and closes the wheel', wheel.isOpen === false);
+    ok('escape: focus restores to the previous holder', engine.focusedNode === beltSlots[0]);
+
+    // outside-press dismissal
+    wheel.open(CX, CY, { silent: true });
+    const rect = engine.canvas.getBoundingClientRect();
+    engine.canvas.dispatchEvent(new PointerEvent('pointerdown', { clientX: rect.left + 30, clientY: rect.top + 30, button: 0, pointerId: 91, bubbles: true }));
+    engine.canvas.dispatchEvent(new PointerEvent('pointerup', { clientX: rect.left + 30, clientY: rect.top + 30, button: 0, pointerId: 91, bubbles: true }));
+    await wait(40);
+    engine.captures.clear(); // synthetic pointer bookkeeping (the fixture rule)
+    ok('dismiss: a press outside the ring closes the wheel', wheel.isOpen === false);
+
+    // stick sector pick through an injected pad (deterministic, no hardware)
+    const fakePad = { connected: true, axes: [0, 0], buttons: [] };
+    const rm2 = new RadialMenu({
+      items: [
+        { id: 'n', label: 'N' }, { id: 'e', label: 'E' },
+        { id: 's', label: 'S' }, { id: 'w', label: 'W' },
+      ],
+      rOut: 90, rIn: 34,
+      getGamepads: () => [fakePad],
+    });
+    rm2.open(CX, CY, { silent: true });
+    fakePad.axes = [1, 0]; // hard right → sector 1 of 4
+    await wait(120);
+    ok('stick: hard right picks the east sector', rm2.index === 1);
+    fakePad.axes = [0, -1]; // hard up → sector 0
+    await wait(120);
+    ok('stick: hard up picks the north sector', rm2.index === 0);
+    fakePad.axes = [0.1, -0.1]; // inside the dead zone: no change
+    rm2._setIndex(2, false);
+    await wait(120);
+    ok('stick: the dead zone holds the selection', rm2.index === 2);
+    rm2.close({ silent: true });
+    rm2.dispose();
+
+    // the boss: phases commit, enrage re-dispatches the BigTimer timeout
+    const phases = [];
+    boss.on('change', (e) => phases.push(e.value));
+    boss.setPhase(2);
+    ok('boss: setPhase(2) fills two segments and commits', boss.phase === 2 && boss.bar.value === 2 && phases.join(',') === '2');
+    ok('boss: the stagger unseals the Flame wedge (locked at boot with a spoken reason)',
+      wheel.items.find((it) => it.id === 'flame').disabled === false
+      && typeof wheel.items.find((it) => it.id === 'flame').reason === 'string');
+    boss.setPhase(2);
+    ok('boss: a same-phase set is a no-op (no double commit)', phases.length === 1);
+    boss.enrage(0.3);
+    ok('boss: enrage raises the clock', boss.timer.visible === true);
+    await wait(800);
+    ok('boss: the timeout re-dispatched as enrage', enraged === true);
+
+    // NaN seeding (the nanmax law)
+    // the relation is the contract, not the formula: re-stating `rIn === round(rOut
+    // * 0.37)` re-implements the widget's own arithmetic and drifts with it
+    const nanWheel = new RadialMenu({ rOut: NaN, rIn: NaN, items: [{ id: 'x', label: 'X' }] });
+    ok('nan: RadialMenu radii guard finite with a real ring (0 < rIn < rOut)',
+      Number.isFinite(nanWheel.rOut) && Number.isFinite(nanWheel.rIn)
+      && nanWheel.rIn > 0 && nanWheel.rIn < nanWheel.rOut);
+    nanWheel.open(NaN, NaN, { silent: true });
+    ok('nan: open(NaN,NaN) clamps to a reachable center',
+      Number.isFinite(nanWheel.x) && Number.isFinite(nanWheel.y) && nanWheel.isOpen === true);
+    nanWheel.close({ silent: true });
+    nanWheel.dispose();
+    const nanBoss = new BossBar({ phases: NaN });
+    ok('nan: BossBar phases guard to the default', nanBoss.phases === 3);
+    nanBoss.dispose();
+
+    // the stamina recipe: the tier COLOR at the 0.3 boundary, read off the gauge's
+    // own raster — `value === 20` after setValue(20) measured nothing the old name
+    // claimed. Private read (_art): the painted sweep has no public getter, and the
+    // raster IS the threshold behavior.
+    const ringInk = () => {
+      const art = stamina._art;
+      const rr = stamina.radius - stamina.thickness / 2 - 1;
+      const px = Math.round((stamina.radius + Math.cos(Math.PI * 0.75) * rr) * art.scale);
+      const py = Math.round((stamina.radius + Math.sin(Math.PI * 0.75) * rr) * art.scale);
+      return art.ctx.getImageData(px, py, 1, 1).data;
+    };
+    const inkNear = (d, hex) => {
+      const n = parseInt(hex.slice(1), 16);
+      return Math.abs(d[0] - (n >> 16)) < 24 && Math.abs(d[1] - ((n >> 8) & 255)) < 24
+        && Math.abs(d[2] - (n & 255)) < 24;
+    };
+    stamina.setValue(29.9, { silent: true, animate: false });
+    const lowInk = ringInk();
+    stamina.setValue(30, { silent: true, animate: false });
+    const questInk = ringInk();
+    ok('stamina: the ring paints its tier at the 0.3 boundary (29.9 reads blood, 30 reads quest)',
+      inkNear(lowInk, COLORS.negative) && inkNear(questInk, COLORS.quest));
+    stamina.setValue(-5, { silent: true, animate: false });
+    ok('stamina: setValue clamps at the floor (-5 reads 0)', stamina.value === 0);
+    stamina.setValue(100, { silent: true, animate: false });
+
+    // the sprint hold: the page binds Shift through Eldritch.onKey (~L358) and until
+    // now nothing ever pressed it. The REAL key path end to end: DOM focus on the
+    // canvas, a real KeyboardEvent pair, the window listener, the engine bus, the
+    // onKey registration — the exact path shooter-hud once faked and shipped broken.
+    engine.setFocus(null); // (3.2.x) an engine-focused widget would field the key first
+    engine.canvas.focus();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift', bubbles: true }));
+    await wait(40);
+    const heldSprint = sprinting === true;
+    window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Shift', bubbles: true }));
+    await wait(40);
+    ok('sprint: a real Shift press holds the sprint and its release ends it',
+      heldSprint && sprinting === false);
+
+    // hit-reach: the REAL probe answers for the belt (the dispatch blind spot). The
+    // driver button this used to probe is gone; the belt is the chrome that has to
+    // stay reachable under the scene and the anchor layer.
+    const s0 = beltSlots[0];
+    const hitBelt = hitTest(engine, s0.worldX + s0.w / 2, s0.worldY + s0.h / 2);
+    ok('hit-reach: the belt answers the real hit probe',
+      hitBelt === s0 || (s0.isAncestorOf ? s0.isAncestorOf(hitBelt) : false)
+      || (belt.isAncestorOf ? belt.isAncestorOf(hitBelt) : false));
+
+    // the wheel opens where the hand is: a right-click on EMPTY scene, through the
+    // same bus path a real press takes (dispatch would bypass hit testing entirely)
+    wheel.close({ silent: true });
+    engine.bus.emit('pointerdown', { x: 300, y: 300, button: 2, pointerId: 77, target: null, native: null });
+    await wait(40);
+    // open() seats the node by its TOP-LEFT (setPos(cx - rOut, cy - rOut)), so the
+    // centre is x + rOut - reading wheel.x as the centre is off by a full radius
+    ok(`wheel: a right-click on empty scene opens the circle at the cursor [${Math.round(wheel.x + wheel.rOut)},${Math.round(wheel.y + wheel.rOut)}]`,
+      wheel.isOpen === true
+      && Math.round(wheel.x + wheel.rOut) === 300 && Math.round(wheel.y + wheel.rOut) === 300);
+    // and a right-click that lands ON chrome belongs to the chrome, not the wheel
+    wheel.close({ silent: true });
+    engine.bus.emit('pointerdown', { x: 300, y: 300, button: 2, pointerId: 78, target: s0, native: null });
+    await wait(40);
+    ok('wheel: a right-click on chrome does NOT steal the circle', wheel.isOpen === false);
+    // the radial CHAIN: the same slot, through the dispatcher's own door —
+    // the rite offers ITS verbs on the shared wheel while the page circle rests
+    const openedA = engine.radialFallback(s0, 400, 300, null);
+    ok('chain: a belt slot offers its rite verbs on the shared wheel — the circle stays shut',
+      openedA === true && engine.radialShared?.isOpen === true
+      && engine.radialShared.items[0]?.id === 'invoke' && wheel.isOpen === false);
+    engine.radialShared.close({ silent: true });
+    await wait(40);
+
+    // the deeper circle: the lantern is a PARENT — descending, picking a
+    // state, and the one-level Escape all through the wheel's real verbs
+    wheel.open(400, 300, { silent: true });
+    await wait(40);
+    wheel._setIndex(0, false); // the lantern sector
+    wheel.onActivate();
+    await wait(40);
+    ok('wheel: the lantern descends to its states — no select, one ring deep',
+      wheel.isOpen === true && wheel.depth === 1);
+    wheel._setIndex(0, false); // Lit
+    wheel.onActivate();
+    await wait(40);
+    ok('wheel: a nested pick reaches the hand with its whole path',
+      wheel.isOpen === false && window.__action.wieldedText() === 'Wielding: lantern (lit)');
+    wheel.open(400, 300, { silent: true });
+    await wait(40);
+    wheel._setIndex(0, false);
+    wheel.onActivate();
+    engine.focus.cancel();
+    ok('wheel: Escape pops one ring — the wheel stays open at the root',
+      wheel.isOpen === true && wheel.depth === 0);
+    engine.focus.cancel();
+    ok('wheel: the second Escape closes the circle', wheel.isOpen === false);
+
+    ok('the whole watch ran without a single page error', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;max-height:95vh;overflow:auto;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:10px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `ACTIONHUD ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,1160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Social HUD</title>
+<!-- @demo   The Guildhall: guild management, guild chat, and the group — a roster you rank and prune from a real table, a message of the day you set, chat with guild/officer/party/whisper voices, and party UNIT frames (portraits, tweened rails, buffs) with a leader crown, a fallen ally, a lost connection, and a ready check that answers.
+     @shows  PartyPanel, Table, ChatBox, Select, EldWindow, EldContextMenu, EldPopup, RadialMenu, Button, TextNode, UINode, QuadNode
+     @params ?freeze=1 — bit-stable snapshot boot (sim parked, fixed cast) · ?assert=1 — the in-page suite titles its own PASS count -->
+
+<!-- the gathering flagship was DESTROYED AND REBUILT on the rule
+     (guild management + guild chat + a group interface with party unit frames;
+     nothing of the old shore survives — the rail column, the nameplate pool, the
+     scoreboard, the emote wheels, and the ping chip died with it). The screen is
+     a guildhall: the party stands in the left rail as REAL unit frames (crown on
+     the leader, Dead across an emptied rail, Offline dimmed and refusing), the
+     guild window holds the MOTD and a sortable roster whose right-click menu
+     promotes, demotes, whispers, invites to the group, and removes (rank
+     legality enforced; removals confirm), and the chat carries guild / officer /
+     party voices plus /w whispers. Enter reaches the say box from anywhere and
+     the send hands the keyboard back; G toggles the guild window and typing g
+     into chat stays typing. Right-click on the open hall raises the ground
+     circle (Ready Check, Guild > Roster / Invite). The ready check pends every
+     reachable frame and the answers land as chips. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import {
+  Eldritch, PartyPanel, ChatBox, Table, Select, Button, RadialMenu,
+  EldWindow, EldContextMenu, EldPopup,
+  TextNode, UINode, QuadNode, COLORS, FONTS, hitTest, contentRect,
+} from '../src/lovecraft-ui.js';
+import * as THREE from 'three';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+// the census boots (audit/torture/resize) must see the RESTING hall — the sim
+// gates at the source, not behind a dead switch
+const INSTRUMENTED = FROZEN || ASSERT
+  || params.has('audit') || params.has('torture') || params.has('resize');
+const UISCALE = Number(params.get('uiscale'));
+const SCALE_OPT = Number.isFinite(UISCALE) && UISCALE > 0 ? { uiScale: UISCALE } : {};
+Eldritch.init(FROZEN || ASSERT
+  ? { ...SCALE_OPT, background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { ...SCALE_OPT, contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+
+// ---- the icon pack (optional download): the RE-SKIN idiom ----
+// `as:` re-bakes ids this page already uses (the party buffs); `fallback: 'none'`
+// keeps the procedural art standing when assets/ is absent. Skipped under FROZEN:
+// frozen baselines run on the procedural art by necessity.
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-0307', as: 'leafs' },
+      { id: 'ico-0210', as: 'shield' },
+      { id: 'ico-3649', as: 'book' },
+    ],
+  });
+}
+
+window.engine = engine;
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+
+// Page placement must CHAIN a widget's own onLayout, never clobber it.
+const place = (node, fn) => {
+  const own = node.onLayout?.bind(node);
+  node.onLayout = function () { own?.(); fn.call(this); };
+};
+
+// ---- the hall: ONE page-owned canvas — braziers, banners, a long table,
+// moonlit lancets; deterministic paint, zero atlas entries by construction.
+// The quad rides the layer BARE (no wrapper): leaf decor is overlap-exempt by
+// type, so the furniture resting over the scenery costs no allowances ----
+const bdCanvas = document.createElement('canvas');
+const bdTex = new THREE.CanvasTexture(bdCanvas);
+bdTex.colorSpace = THREE.SRGBColorSpace;
+const bdQuad = new QuadNode({ texture: bdTex });
+function hallRng(seed) {
+  let s = seed >>> 0;
+  return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+}
+function paintHall() {
+  const W = Math.max(2, engine.width), H = Math.max(2, engine.height);
+  if (bdCanvas.width !== W || bdCanvas.height !== H) { bdCanvas.width = W; bdCanvas.height = H; }
+  const ctx = bdCanvas.getContext('2d');
+  const r = hallRng(0x9a11);
+  // the hall stands in near-dark; the floor catches what little light there is
+  ctx.fillStyle = '#070808';
+  ctx.fillRect(0, 0, W, H);
+  const horizon = H * 0.42;
+  // the far wall: great stone courses, barely lit
+  const wall = ctx.createLinearGradient(0, 0, 0, horizon);
+  wall.addColorStop(0, '#0a0c0d');
+  wall.addColorStop(1, '#121110');
+  ctx.fillStyle = wall;
+  ctx.fillRect(0, 0, W, horizon);
+  ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+  ctx.lineWidth = 1;
+  for (let y = 40; y < horizon; y += 34) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+    const off = (y / 34) % 2 ? 40 : 0;
+    for (let x = off; x < W; x += 80) {
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, Math.min(y + 34, horizon)); ctx.stroke();
+    }
+  }
+  // the hearth: a warm arch low on the far wall, banked embers inside
+  {
+    const hx = W * 0.30, hw = 92, hh = horizon * 0.34, hy = horizon - hh;
+    ctx.fillStyle = '#050505';
+    ctx.beginPath();
+    ctx.moveTo(hx - hw / 2, horizon);
+    ctx.lineTo(hx - hw / 2, hy + hw / 3);
+    ctx.arc(hx, hy + hw / 3, hw / 2, Math.PI, 0);
+    ctx.lineTo(hx + hw / 2, horizon);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    const ember = ctx.createRadialGradient(hx, horizon - 8, 2, hx, horizon - 8, hw * 0.42);
+    ember.addColorStop(0, 'rgba(226,132,52,0.55)');
+    ember.addColorStop(0.5, 'rgba(180,80,30,0.22)');
+    ember.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = ember;
+    ctx.fillRect(hx - hw / 2, hy, hw, hh);
+  }
+  // lancet windows: stone-framed openings of leaded night glass
+  for (const wx of [W * 0.45, W * 0.62, W * 0.79]) {
+    const ww = 38, wh = horizon * 0.54, wy = horizon * 0.14;
+    const lancet = () => {
+      ctx.beginPath();
+      ctx.moveTo(wx - ww / 2, wy + wh);
+      ctx.lineTo(wx - ww / 2, wy + ww / 2);
+      ctx.arc(wx, wy + ww / 2, ww / 2, Math.PI, 0);
+      ctx.lineTo(wx + ww / 2, wy + wh);
+      ctx.closePath();
+    };
+    // the glass: cold night light, darker toward the sill
+    const moon = ctx.createLinearGradient(0, wy, 0, wy + wh);
+    moon.addColorStop(0, 'rgba(150,182,204,0.20)');
+    moon.addColorStop(1, 'rgba(120,150,170,0.05)');
+    ctx.fillStyle = moon;
+    lancet();
+    ctx.fill();
+    // leading: a mullion and three transoms cut the glass into panes
+    ctx.save();
+    lancet();
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(4,6,7,0.9)';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(wx, wy);
+    ctx.lineTo(wx, wy + wh);
+    for (let i = 1; i <= 3; i++) {
+      ctx.moveTo(wx - ww / 2, wy + (wh * i) / 3.2);
+      ctx.lineTo(wx + ww / 2, wy + (wh * i) / 3.2);
+    }
+    ctx.stroke();
+    ctx.restore();
+    // the stone surround
+    ctx.strokeStyle = '#050708';
+    ctx.lineWidth = 5;
+    lancet();
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(120,130,128,0.25)';
+    ctx.lineWidth = 1.5;
+    lancet();
+    ctx.stroke();
+    // the shaft pooling on the floor
+    const pool = ctx.createLinearGradient(0, wy + wh, 0, H * 0.9);
+    pool.addColorStop(0, 'rgba(178,206,224,0.10)');
+    pool.addColorStop(1, 'rgba(178,206,224,0)');
+    ctx.fillStyle = pool;
+    ctx.beginPath();
+    ctx.moveTo(wx - ww / 2, wy + wh);
+    ctx.lineTo(wx + ww / 2, wy + wh);
+    ctx.lineTo(wx + ww * 2.1, H * 0.9);
+    ctx.lineTo(wx - ww * 2.1, H * 0.9);
+    ctx.closePath();
+    ctx.fill();
+  }
+  // the guild banner between the windows: a deep verdigris drop with the sigil
+  const bx = W * 0.535, bw = 62, bh = horizon * 0.66;
+  ctx.fillStyle = '#0e2418';
+  ctx.beginPath();
+  ctx.moveTo(bx - bw / 2, 6);
+  ctx.lineTo(bx + bw / 2, 6);
+  ctx.lineTo(bx + bw / 2, bh - 16);
+  ctx.lineTo(bx, bh);
+  ctx.lineTo(bx - bw / 2, bh - 16);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(111,209,139,0.45)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(111,209,139,0.08)';
+  ctx.fill();
+  // the sigil: a lantern ring over a keel line, glowing faintly
+  ctx.save();
+  ctx.shadowColor = 'rgba(111,209,139,0.8)';
+  ctx.shadowBlur = 10;
+  ctx.strokeStyle = 'rgba(140,224,168,0.85)';
+  ctx.lineWidth = 2.4;
+  ctx.beginPath();
+  ctx.arc(bx, bh * 0.4, 14, 0, Math.PI * 2);
+  ctx.moveTo(bx, bh * 0.4 - 22);
+  ctx.lineTo(bx, bh * 0.4 + 22);
+  ctx.moveTo(bx - 11, bh * 0.4 + 16);
+  ctx.quadraticCurveTo(bx, bh * 0.4 + 26, bx + 11, bh * 0.4 + 16);
+  ctx.stroke();
+  ctx.restore();
+  // the floor: long flags running toward the wall, then the hall table
+  const floor = ctx.createLinearGradient(0, horizon, 0, H);
+  floor.addColorStop(0, '#161311');
+  floor.addColorStop(1, '#0b0a09');
+  ctx.fillStyle = floor;
+  ctx.fillRect(0, horizon, W, H - horizon);
+  ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+  for (let i = -6; i <= 6; i++) {
+    ctx.beginPath();
+    ctx.moveTo(W / 2 + i * 60, horizon);
+    ctx.lineTo(W / 2 + i * 210, H);
+    ctx.stroke();
+  }
+  for (let y = horizon + 18; y < H; y += (y - horizon) * 0.5 + 16) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  // the long table, low right where the frame breathes — legs, a bench, and
+  // the day's charts left out under a candle
+  {
+    const t0x = W * 0.60, t1x = W * 0.97;
+    const topY0 = H * 0.655, topY1 = H * 0.615, botY0 = H * 0.775, botY1 = H * 0.72;
+    ctx.fillStyle = '#2c2014';
+    ctx.beginPath();
+    ctx.moveTo(t0x, topY0);
+    ctx.lineTo(t1x, topY1);
+    ctx.lineTo(t1x + W * 0.02, botY1);
+    ctx.lineTo(t0x + W * 0.01, botY0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // the lit board edge facing the hearth
+    ctx.strokeStyle = 'rgba(216,150,70,0.22)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(t0x, topY0);
+    ctx.lineTo(t1x, topY1);
+    ctx.stroke();
+    // legs falling into the dark
+    ctx.strokeStyle = '#191008';
+    ctx.lineWidth = 7;
+    for (const [lx, ly] of [[t0x + 14, botY0], [W * 0.78, (botY0 + botY1) / 2], [t1x - 6, botY1]]) {
+      ctx.beginPath();
+      ctx.moveTo(lx, ly);
+      ctx.lineTo(lx - 4, Math.min(H - 4, ly + H * 0.09));
+      ctx.stroke();
+    }
+    // a bench line this side
+    ctx.strokeStyle = '#1c1610';
+    ctx.lineWidth = 9;
+    ctx.beginPath();
+    ctx.moveTo(t0x + W * 0.02, H * 0.84);
+    ctx.lineTo(t1x - W * 0.03, H * 0.79);
+    ctx.stroke();
+    // charts and a ledger left out on the NEAR boards (the guild window rests
+    // over the table's far end — the props live where the frame can see them)
+    ctx.save();
+    ctx.translate(W * 0.705, H * 0.715);
+    ctx.rotate(-0.06);
+    ctx.fillStyle = '#c9bd9c';
+    ctx.fillRect(-26, -14, 52, 30);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    for (let i = 0; i < 4; i++) ctx.fillRect(-20, -8 + i * 6, 40, 1.4);
+    ctx.restore();
+    ctx.save();
+    ctx.translate(W * 0.79, H * 0.705);
+    ctx.rotate(0.1);
+    ctx.fillStyle = '#b8a880';
+    ctx.fillRect(-16, -11, 34, 22);
+    ctx.strokeStyle = 'rgba(80,60,30,0.6)';
+    ctx.strokeRect(-16, -11, 34, 22);
+    ctx.restore();
+    // the candle: a point of true warmth on the boards
+    const cx2 = W * 0.655, cy2 = H * 0.705;
+    const cg = ctx.createRadialGradient(cx2, cy2, 1, cx2, cy2, 70);
+    cg.addColorStop(0, 'rgba(240,190,110,0.55)');
+    cg.addColorStop(0.4, 'rgba(220,150,70,0.16)');
+    cg.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = cg;
+    ctx.fillRect(cx2 - 70, cy2 - 70, 140, 140);
+    ctx.fillStyle = '#e8d8a8';
+    ctx.fillRect(cx2 - 1.5, cy2 - 9, 3, 9);
+  }
+  // warmth without furniture: brazier glows pool where the guild gathers (a
+  // drawn bowl read as a stray stool on the open flags — light alone reads true)
+  for (const [gx, gy, r0] of [[W * 0.36, H * 0.60, 170], [W * 0.115, H * 0.42, 130]]) {
+    const g = ctx.createRadialGradient(gx, gy, 8, gx, gy, r0);
+    g.addColorStop(0, 'rgba(226,160,80,0.16)');
+    g.addColorStop(0.5, 'rgba(210,130,55,0.06)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(gx - r0, gy - r0, r0 * 2, r0 * 2);
+  }
+  // the hearth's warmth pooling onto the near flags
+  {
+    const g = ctx.createRadialGradient(W * 0.30, horizon + 20, 10, W * 0.30, horizon + 20, 220);
+    g.addColorStop(0, 'rgba(216,140,60,0.16)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(W * 0.30 - 220, horizon - 100, 440, 340);
+  }
+  // drifting motes in the moonlight (seeded — bit-stable under ?freeze=1)
+  for (let i = 0; i < 70; i++) {
+    const x = r() * W, y = r() * H * 0.8;
+    ctx.fillStyle = `rgba(180,200,210,${0.02 + r() * 0.05})`;
+    ctx.fillRect(x, y, 1.5, 1.5);
+  }
+  bdTex.needsUpdate = true;
+}
+place(bdQuad, function () {
+  this.setRect(0, 0, engine.width, engine.height);
+  paintHall();
+});
+bdQuad.on('dispose', () => bdTex.dispose());
+engine.layers.background.add(bdQuad);
+
+// ---- the models: the game owns the guild and the group; widgets afford ----
+const RANKS = ['Guildmaster', 'Officer', 'Veteran', 'Member', 'Initiate'];
+const YOU = 'Lanternkeeper'; // an Officer (rank legality derives from this seat; short enough for a frame's name lane)
+const YOUR_RANK = 1;
+
+const guild = [];
+function addSoul(name, level, rankIx, online) {
+  guild.push({ name, level, rankIx, online });
+}
+addSoul('Ivo Blackquay', 60, 0, true);
+addSoul(YOU, 60, 1, true);
+addSoul('Hesse Var', 59, 1, false);
+addSoul('Mora Quayle', 58, 2, true);
+addSoul('Ezel Harrow', 57, 2, true);
+addSoul('Brack Tideman', 60, 2, true);
+addSoul('Sela Voss', 55, 3, false);
+addSoul('Odo Marsh', 52, 3, true);
+addSoul('Wren Carro', 49, 3, true);
+addSoul('Ilse Gunn', 57, 2, false);
+addSoul('Hale Bittern', 44, 3, true);
+addSoul('Pia Norr', 38, 3, false);
+addSoul('Casmir Lowe', 41, 3, true);
+addSoul('Tavi Hollow', 33, 3, false);
+addSoul('Rilke Stone', 29, 4, true);
+addSoul('Juno Pell', 26, 4, false);
+addSoul('Aldous Wick', 60, 2, false);
+addSoul('Beryl Ash', 51, 3, true);
+addSoul('Corvin Tarr', 47, 3, false);
+addSoul('Dell Winnow', 36, 3, false);
+addSoul('Edda Frost', 58, 2, false);
+addSoul('Fenn Ropewalk', 22, 4, true);
+addSoul('Greta Vayne', 54, 3, false);
+addSoul('Halvar Dun', 31, 4, false);
+addSoul('Iris Coldwell', 45, 3, false);
+addSoul('Jorunn Salt', 39, 3, false);
+addSoul('Kell Bracken', 19, 4, false);
+addSoul('Lena Morrow', 50, 3, true);
+addSoul('Marek Sorrel', 27, 4, false);
+addSoul('Nils Undertow', 42, 3, false);
+addSoul('Oda Grimsby', 35, 4, false);
+addSoul('Petra Nightjar', 48, 3, false);
+addSoul('Quill Farrow', 24, 4, false);
+addSoul('Sable Trench', 56, 2, false);
+const byName = (name) => guild.find((s) => s.name === name) ?? null;
+const onlineCount = () => guild.filter((s) => s.online).length;
+
+let motd = 'Muster at the quay before the third bell. Bring salt.';
+
+// the group: you lead; one healer, one fallen, one lost to the storm outside
+const PARTY_SEED = [
+  { id: 'you', name: YOU, level: 60, role: 'tank', leader: true, portrait: 'portrait.player', hp: 188, hpMax: 210, mp: 140, mpMax: 160 },
+  { id: 'mora', name: 'Mora Quayle', level: 58, role: 'healer', portrait: 'portrait.keeper', hp: 132, hpMax: 170, mp: 96, mpMax: 180 },
+  { id: 'ezel', name: 'Ezel Harrow', level: 57, role: 'damage', portrait: 'portrait.target', hp: 121, hpMax: 150, mp: 88, mpMax: 120 },
+  { id: 'brack', name: 'Brack Tideman', level: 60, role: 'damage', portrait: 'portrait.brine', hp: 0, hpMax: 190, mp: 30, mpMax: 110, state: 'dead' },
+  { id: 'sela', name: 'Sela Voss', level: 55, role: 'damage', portrait: 'portrait.keeper', hp: 130, hpMax: 160, mp: 70, mpMax: 140, state: 'offline' },
+];
+
+// ---- the chat: guild / officer / party voices plus whispers ----
+const CHANNELS = {
+  guild: { tag: 'Guild', color: COLORS.accent },
+  officer: { tag: 'Officer', color: COLORS.quest },
+  party: { tag: 'Party', color: COLORS.link },
+};
+const chatHeader = new UINode({ name: 'chat-header' });
+const channelSel = new Select({ options: ['Guild', 'Officer', 'Party'], value: 'Guild', width: 110 });
+const targetText = new TextNode('Target: —', {
+  font: FONTS.header, size: 13, smallCaps: true, letterSpacing: 1,
+  color: COLORS.textMuted, shadow,
+});
+chatHeader.add(channelSel, targetText);
+chatHeader.setSize(430, 26);
+place(chatHeader, function () {
+  // glued to the chat's live TOP by the same INPUTS the chat derives from —
+  // reading chat.y here would trail the grip by one layout beat (the
+ // game-hud lesson: a glue that reads a sibling's laid-out state races the
+ // settle; chat.h updates synchronously under the grip's setRect)
+  this.setPos(290, engine.height - 50 - 8 - chat.h - 30);
+  channelSel.setPos(0, 0);
+  targetText.setPos(124, 6);
+});
+engine.layers.background.add(chatHeader);
+
+// the house grip: the feed resizes like every other
+// demo's — corner 'tr' (bottom-left-anchored, the game-hud idiom); the budget
+// below keeps a grown feed off the guild window and the header lane rides the
+// growth. echo: false — the submit handler below renders every send in its
+// CHANNEL voice; the widget's raw SAY echo would double each line.
+// 268 tall: a smaller default read too few whole lines; this height reads ~11.
+// ONE pair of boot constants: the ctor, the header glue, and the replay
+// handles all derive from these — a hand literal in any of them goes stale
+// the moment the box changes.
+const CHAT_W = 430, CHAT_H = 268;
+const chat = new ChatBox({
+  width: CHAT_W, height: CHAT_H, markup: true, register: false, echo: false,
+  placeholder: 'Say to the guild…  (/o officer · /p party · /w name text)',
+  resizable: { corner: 'tr', minW: 340, minH: 160 },
+});
+place(chat, function () {
+  this.setPos(290, engine.height - 50 - 8 - this.h);
+  // THE FREEDOM LAW ("what if I want to drag my chat to
+ // cover most of the screen?"): no element budgets the grip. The old live
+  // ceiling read guildWin.x, so MOVING the window snapped a grown chat down on
+  // the next grip touch. ResizeGrip's built-in screen-bounds ceiling (the drag
+  // handle stays visible) is the only clamp now.
+});
+engine.layers.background.add(chat);
+
+function say(channel, who, text) {
+  const c = CHANNELS[channel] ?? CHANNELS.guild;
+  chat.log(`{color:${c.color}}[${c.tag}] ${who}:{/} ${text}`, 'CHAT');
+}
+function sysline(text) {
+  chat.log(`{color:${COLORS.accent}}[Guild]{/} {i}${text}{/}`, 'GUILD');
+}
+function whisper(who, text, incoming) {
+  const arrow = incoming ? `From ${who}` : `To ${who}`;
+  chat.log(`{color:${COLORS.rarityEpic}}[${arrow}]{/} ${text}`, 'WHSP');
+}
+
+// the send routes by slash prefix; the picker holds the standing channel
+chat.on('submit', ({ value }) => {
+  let text = value;
+  let channel = String(channelSel.value ?? 'Guild').toLowerCase();
+  const mw = /^\/w\s+(\S+)\s+(.+)$/i.exec(text);
+  if (mw) {
+    whisper(titleCase(mw[1]), mw[2], false);
+    engine.setFocus(null); // the send hands the keyboard back
+    return;
+  }
+  if (/^\/o\s+/i.test(text)) { channel = 'officer'; text = text.replace(/^\/o\s+/i, ''); }
+  else if (/^\/p\s+/i.test(text)) { channel = 'party'; text = text.replace(/^\/p\s+/i, ''); }
+  else if (/^\/g\s+/i.test(text)) { channel = 'guild'; text = text.replace(/^\/g\s+/i, ''); }
+  say(channel, YOU, text);
+  engine.setFocus(null); // the keyboard returns to the hall after every send
+});
+function titleCase(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+// Enter opens the chat (the MMO convention): a free Enter
+// hands the keyboard to the say box; the send above hands it back
+Eldritch.onKey('Enter', { down: () => chat.focusInput() });
+
+// ---- the party: unit frames in the left rail ----
+const partyHeader = new TextNode('Party', {
+  font: FONTS.header, size: 15, smallCaps: true, letterSpacing: 2,
+  color: COLORS.accent, shadow,
+});
+partyHeader.setPos(24, 20);
+engine.layers.background.add(partyHeader);
+
+const party = new PartyPanel({ members: PARTY_SEED, gap: 2 });
+party.setPos(24, 64);
+engine.layers.background.add(party);
+
+party.on('target', ({ id }) => {
+  const m = party.memberOf(id);
+  targetText.setText(`Target: ${m ? m.name : '—'}`);
+  targetText.setColor(m ? COLORS.text : COLORS.textMuted);
+});
+
+// the standing buffs: seated through the panel; `effectclick` bubbles
+party.addEffect('you', { icon: 'leafs', name: 'Well Fed', desc: 'The hall table remembers you.', duration: '52m remaining', buff: true });
+party.addEffect('mora', { icon: 'shield', name: 'Elder Ward', desc: 'Absorbs 500 damage.', duration: '8m remaining', buff: true });
+party.on('effectclick', ({ name }) => sysline(`${name} — right-click a frame for group orders.`));
+
+// the ready check: the button begins it; the GAME clocks the answers (below)
+let readyClock = null;
+const readyBtn = new Button('Ready Check', {
+  minWidth: 120,
+  onClick: () => beginReadyCheck(),
+});
+readyBtn.setPos(120, 10);
+engine.layers.background.add(readyBtn);
+function beginReadyCheck() {
+  party.beginReadyCheck();
+  party.setReady('you', true); // the caller stands ready by asking
+  sysline('Ready check begun.');
+  readyClock = INSTRUMENTED ? null : { t: 0, answered: new Set(['you']) };
+}
+
+// group verbs from a frame's right-click (the menu CONSUMES — the standing ruling)
+party.on('rightclick', (e) => {
+  const row = party.rows.find((r) => r === e.target || r.isAncestorOf?.(e.target));
+  if (!row) return;
+  e.preventDefault();
+  const m = row.member;
+  const self = m.id === 'you';
+  EldContextMenu.show([
+    { label: `Whisper ${m.name}`, disabled: self || m.state === 'offline', onClick: () => prefillWhisper(m.name) },
+    { label: 'Pass Lead', disabled: self || m.state !== 'alive' || !party.memberOf('you')?.leader, onClick: () => passLead(m) },
+    { separator: true },
+    { label: 'Remove from Group', disabled: self, onClick: () => removeFromGroup(m) },
+  ], e.x, e.y);
+});
+function prefillWhisper(name) {
+  chat.field.setValue(`/w ${name} `);
+  chat.focusInput();
+}
+function passLead(m) {
+  party.setMember(m.id, { leader: true });
+  sysline(`${m.name} leads the group now.`);
+}
+function removeFromGroup(m) {
+  const name = m.name;
+  party.removeMember(m.id);
+  sysline(`${name} has left the group.`);
+}
+
+// ---- the guild window: MOTD, the roster, the verbs ----
+const rosterRows = () => guild.map((s) => [s.name, s.level, RANKS[s.rankIx], s.online ? 'Online' : 'Offline']);
+const roster = new Table({
+  columns: [
+    { label: 'Name', width: 150 },
+    { label: 'Level', width: 56 },
+    { label: 'Rank', width: 100 },
+    { label: 'Status', width: 84 },
+  ],
+  rows: rosterRows(),
+  sort: { column: 0, ascending: true }, // boots ordered SILENTLY
+});
+
+// the guild's NAME rides inside the window — the title bar carries the pure
+// function ('Guild') because the fitted width would truncate the name into
+// the 'Friends of the L…' class the style rules outlaw (STYLE 1a.1)
+const guildName = new TextNode('Wardens of the Deep', {
+  font: FONTS.header, size: 14, smallCaps: true, letterSpacing: 2,
+  color: COLORS.bone, shadow,
+});
+const motdLabel = new TextNode('Message of the Day', {
+  font: FONTS.header, size: 13, smallCaps: true, letterSpacing: 1,
+  color: COLORS.accent, shadow,
+});
+const motdText = new TextNode(motd, {
+  size: 13, color: COLORS.text, multiline: true, maxWidth: 270, shadow, // clear of the Edit button's measured column
+});
+const onlineText = new TextNode('', {
+  font: FONTS.mono, size: 12, color: COLORS.textMuted, shadow,
+});
+function refreshOnline() { onlineText.setText(`Online ${onlineCount()}/${guild.length}`); }
+refreshOnline();
+const motdEdit = new Button('Edit…', {
+  minWidth: 64,
+  onClick: () => {
+    EldPopup.show({
+      title: 'Message of the Day', message: 'Set the line every member sees.',
+      prompt: { value: motd },
+      onOkay: (v) => { if (v && v.trim()) setMotd(v.trim()); },
+    });
+  },
+});
+function setMotd(v) {
+  motd = v;
+  motdText.setText(motd);
+  sysline('The message of the day changed.');
+  guildWin?.content && guildWin.content.invalidateLayout();
+}
+
+const inviteBtn = new Button('Invite…', {
+  minWidth: 96,
+  onClick: () => {
+    EldPopup.show({
+      title: 'Invite to Guild', message: 'Whose name goes in the book?',
+      prompt: { placeholder: 'a name' },
+      onOkay: (v) => { if (v && v.trim()) invite(v.trim()); },
+    });
+  },
+});
+function invite(name) {
+  if (byName(name)) { sysline(`${name} is already in the book.`); return; }
+  addSoul(name, 1, 4, true);
+  roster.addRow([name, 1, RANKS[4], 'Online']);
+  refreshOnline();
+  sysline(`${name} joined the guild.`);
+}
+
+// rank legality from YOUR seat (an Officer): the oracle the menu is built from
+function rosterVerbsFor(soul) {
+  const self = soul.name === YOU;
+  const untouchable = soul.rankIx <= YOUR_RANK; // the master and fellow officers
+  return {
+    whisper: !self && soul.online,
+    inviteGroup: !self && soul.online && !party.memberOf(idFor(soul.name)) && party.members.length < 5,
+    promote: !self && !untouchable && soul.rankIx > 2,
+    demote: !self && !untouchable && soul.rankIx < RANKS.length - 1 && soul.rankIx >= 2,
+    remove: !self && !untouchable,
+  };
+}
+const idFor = (name) => (party.members.find((m) => m.name === name) ?? {}).id ?? name.toLowerCase().replace(/[^a-z]+/g, '-');
+
+function rosterRowIndexOf(node) {
+  // rowNodes holds {node, row} records — walk the hit up to a record's node
+  let n = node;
+  while (n) {
+    const ix = roster.rowNodes.findIndex((r) => r.node === n);
+    if (ix !== -1) return ix;
+    n = n.parent;
+  }
+  return -1;
+}
+roster.on('rightclick', (e) => {
+  const ix = rosterRowIndexOf(e.target);
+  if (ix === -1) return;
+  const row = roster.getRows()[ix];
+  const soul = byName(row[0]);
+  if (!soul) return;
+  e.preventDefault();
+  const can = rosterVerbsFor(soul);
+  EldContextMenu.show([
+    { label: `Whisper ${soul.name}`, disabled: !can.whisper, onClick: () => prefillWhisper(soul.name) },
+    { label: 'Invite to Group', disabled: !can.inviteGroup, onClick: () => inviteToGroup(soul) },
+    { separator: true },
+    { label: 'Promote', disabled: !can.promote, onClick: () => promote(soul) },
+    { label: 'Demote', disabled: !can.demote, onClick: () => demote(soul) },
+    { separator: true },
+    { label: 'Remove from Guild…', disabled: !can.remove, onClick: () => removeFromGuild(soul) },
+  ], e.x, e.y);
+});
+function rosterIndexOfName(name) {
+  return roster.getRows().findIndex((r) => r[0] === name);
+}
+function promote(soul) {
+  soul.rankIx -= 1;
+  roster.updateCell(rosterIndexOfName(soul.name), 2, RANKS[soul.rankIx]);
+  sysline(`${soul.name} was promoted to ${RANKS[soul.rankIx]}.`);
+}
+function demote(soul) {
+  soul.rankIx += 1;
+  roster.updateCell(rosterIndexOfName(soul.name), 2, RANKS[soul.rankIx]);
+  sysline(`${soul.name} was demoted to ${RANKS[soul.rankIx]}.`);
+}
+function removeFromGuild(soul) {
+  EldPopup.show({
+    title: 'Remove from Guild', message: `Strike ${soul.name} from the book? This cannot be undone.`,
+    onOkay: () => {
+      const gi = guild.indexOf(soul);
+      if (gi !== -1) guild.splice(gi, 1);
+      roster.removeRow(rosterIndexOfName(soul.name));
+      refreshOnline();
+      sysline(`${soul.name} was removed from the guild.`);
+    },
+  });
+}
+function inviteToGroup(soul) {
+  if (party.members.length >= 5) { sysline('The group is full.'); return; }
+  party.setMembers([...party.members, {
+    id: idFor(soul.name), name: soul.name, level: soul.level,
+    role: 'damage', portrait: 'portrait.brine',
+    hp: 100 + soul.level, hpMax: 100 + soul.level, mp: 100, mpMax: 100,
+  }]);
+  sysline(`${soul.name} joined the group.`);
+}
+
+let guildWin = null;
+function openGuildWindow() {
+  guildWin = EldWindow.create({
+    id: 'guild', title: 'Guild',
+    // the rule: NO grip — the window is sized BY its
+    // content instead. Width derives from the SAME record math layoutChrome
+    // uses (contentRect of the window frame — never a guessed inset, the
+    // socket-law lesson), so the content box seats the roster exactly and no
+    // horizontal rail can stand; height fills the column down to the taskbar
+    // band so the member list stops feeling cramped (the roster scrolls
+    // vertically inside, the MMO norm).
+    x: 740, y: 56, resizable: false,
+    width: roster.tableW
+      + (434 - contentRect(engine.textures.frame('window.frame'), 434, 470).w) + 2,
+    height: Math.min(650, engine.height - 56 - 50 - 8),
+    footer: [inviteBtn],
+    content: (c) => {
+      guildName.setPos(10, 6);
+      motdLabel.setPos(10, 30);
+      // right-aligned INSIDE the guaranteed content width — the button MEASURES
+      // its label past minWidth, and a hand-guessed x was the original rail: at
+      // x322 the ~99px face reached 421 and overran every box the window had
+      motdEdit.setPos(Math.round(roster.tableW + 2 - motdEdit.w - 2), 22);
+      motdText.setPos(10, 52);
+      onlineText.setPos(10, 88);
+      roster.setPos(0, 110);
+      c.add(guildName, motdLabel, motdEdit, motdText, onlineText, roster);
+    },
+    onClose: () => { guildWin = null; },
+  });
+}
+openGuildWindow();
+
+// G toggles the window; typing g into chat stays typing (focus-aware onKey)
+Eldritch.onKey('g', {
+  down: () => {
+    if (!guildWin) { openGuildWindow(); return; }
+    if (guildWin.minimized) guildWin.restore();
+    else guildWin.minimize();
+  },
+});
+
+// ---- the ground circle: the hall's errands on an unclaimed right-click ----
+const ground = new RadialMenu({
+  ground: true, // the radial chain's terminus
+  items: [
+    { id: 'ready', label: 'Ready Check' },
+    { id: 'guild', label: 'Guild', children: [
+      { id: 'roster', label: 'Roster' },
+      { id: 'invite', label: 'Invite…' },
+    ] },
+  ],
+});
+ground.on('select', ({ id, path }) => {
+  if (id === 'ready') beginReadyCheck();
+  else if (path[0] === 'guild') {
+    if (id === 'roster') {
+      if (!guildWin) openGuildWindow();
+      else if (guildWin.minimized) guildWin.restore();
+      else guildWin.minimize();
+    } else if (id === 'invite') inviteBtn.dispatch('click', {});
+  }
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+
+// ---- the living hall (parked under every instrument) ----
+const CHATTER = [
+  ['guild', 'Odo Marsh', 'Any word from the lighthouse crew?'],
+  ['guild', 'Wren Carro', 'The nets came up empty again. Empty and WET.'],
+  ['guild', 'Hale Bittern', 'Selling six brined pearls, guild rate.'],
+  ['guild', 'Rilke Stone', 'Who left a candle burning in the map room?'],
+  ['officer', 'Ivo Blackquay', 'Officers: rotate the watch before the third bell.'],
+  ['guild', 'Beryl Ash', 'The stairs to the cellar are singing again.'],
+  ['guild', 'Fenn Ropewalk', 'First tide tomorrow. Bring oars, not opinions.'],
+  ['party', 'Mora Quayle', 'Wards are ready when you are.'],
+  ['guild', 'Casmir Lowe', 'Lost a boot to the marsh. The GOOD boot.'],
+  ['guild', 'Lena Morrow', 'Reading the old charts by the north brazier if anyone cares.'],
+];
+if (!INSTRUMENTED) {
+  const rng = hallRng(0x51de);
+  let tChat = 4.5, tGuild = 11, tDrift = 1.6;
+  let chatIx = 0;
+  engine.ticker.add((dt) => {
+    // the ready check answers: each living member confirms within a few breaths
+    if (readyClock) {
+      readyClock.t += dt;
+      for (const [id, at] of [['mora', 1.2], ['ezel', 2.3], ['brack', 3.4]]) {
+        if (readyClock.t >= at && !readyClock.answered.has(id)) {
+          readyClock.answered.add(id);
+          const m = party.memberOf(id);
+          if (m) party.setReady(id, m.state === 'alive');
+        }
+      }
+      if (readyClock.t > 6) { party.clearReadyCheck(); readyClock = null; }
+    }
+    // the chatter
+    tChat -= dt;
+    if (tChat <= 0) {
+      tChat = 6 + rng() * 7;
+      const [ch, who, line] = CHATTER[chatIx++ % CHATTER.length];
+      say(ch, who, line);
+    }
+    // souls come ashore and go: the roster and the count follow
+    tGuild -= dt;
+    if (tGuild <= 0) {
+      tGuild = 12 + rng() * 10;
+      const pool = guild.filter((s) => s.name !== YOU && !party.memberOf(idFor(s.name)));
+      const soul = pool[Math.floor(rng() * pool.length)];
+      if (soul) {
+        soul.online = !soul.online;
+        const ix = rosterIndexOfName(soul.name);
+        if (ix !== -1) roster.updateCell(ix, 3, soul.online ? 'Online' : 'Offline');
+        refreshOnline();
+        sysline(soul.online ? `${soul.name} came ashore.` : `${soul.name} slipped away.`);
+      }
+    }
+    // the party breathes: the hurt mend slowly at the hearth
+    tDrift -= dt;
+    if (tDrift <= 0) {
+      tDrift = 2.2;
+      for (const m of party.members) {
+        if (m.state !== 'alive') continue;
+        if (m.hp < m.hpMax) party.setMember(m.id, { hp: Math.min(m.hpMax, m.hp + 2) });
+      }
+    }
+  });
+  // the hall greets you once the stones settle
+  setTimeout(() => { sysline(motd); }, 600);
+}
+
+// ---- handles for the input replay ----
+window.__social = {
+  party, chat, chatHeader, channelSel, roster, ground, readyBtn, inviteBtn, motdEdit, targetText,
+  guildWin: () => guildWin,
+  onlineText, byName, rosterVerbsFor, invite, inviteToGroup, promote,
+  sayBox: () => chat.field,
+  partyRow: (id) => party.rowOf(id),
+  rosterRowAt: (ix) => roster.rowNodes[ix]?.node ?? null,
+  rosterIndexOfName,
+  menuOpen: () => EldContextMenu.isOpen,
+  hallAt: () => ({ x: Math.round(engine.width * 0.5), y: 300 }),
+  chatGrip: () => chat.grip,
+  // the freedom law's live proof: the grow target is the SCREEN's far corner —
+  // the built-in clamp makes overshoot safe, so the drag may just aim big
+  chatGripTo: () => ({ x: engine.width - 4, y: 40 }),
+  chatGripBack: () => ({ x: 290 + CHAT_W - 12, y: engine.height - 58 - CHAT_H + 12 }),
+  bootChat: () => ({ w: CHAT_W, h: CHAT_H }), // the input replay derives its size exprs from here (no stale literals)
+  oldCeiling: () => (guildWin ? guildWin.x : 740) - 290 - 16,
+};
+
+// ---- READY / ASSERT ----
+if (!ASSERT) {
+  setTimeout(() => {
+    document.title = window.__errs.length ? 'SOCIALHUD BOOT FAIL: ' + window.__errs[0] : 'SOCIALHUD READY';
+  }, 1000);
+} else {
+  (async () => {
+    const results = [];
+    let fails = 0;
+    const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    await wait(400);
+
+    ok('boot: no page errors', window.__errs.length === 0);
+    ok('boot: five frames stand, the window is open, the book holds every soul',
+      party.rows.length === 5 && guildWin != null && roster.getRows().length === guild.length);
+    ok('boot: the MOTD and the online count read true',
+      motdText._text === motd && onlineText._text === `Online ${onlineCount()}/${guild.length}`);
+
+    // ---- the resting layout: the rail, the chat, and the window share one hall ----
+    {
+      const fixtures = [
+        ['party', party], ['readyBtn', readyBtn], ['chat', chat],
+        ['chatHeader', chatHeader], ['guildWin', guildWin],
+      ];
+      const touching = [];
+      for (let i = 0; i < fixtures.length; i++) {
+        for (let j = i + 1; j < fixtures.length; j++) {
+          const [an, a] = fixtures[i];
+          const [bn, b] = fixtures[j];
+          if (a.worldX < b.worldX + b.w && b.worldX < a.worldX + a.w
+            && a.worldY < b.worldY + b.h && b.worldY < a.worldY + a.h) touching.push(`${an}+${bn}`);
+        }
+      }
+      ok(`layout: rail, chat, header and window rest without touching [${touching.join(' ') || 'clear'}]`,
+        touching.length === 0);
+    }
+
+    Eldritch.reducedMotion = true;
+    engine.pointerInside = true;
+
+    // ---- the party frames: crown, the fallen, the lost ----
+    ok('party: the crown rides the leader row alone',
+      party.rows[0].crown.visible === true && party.rows.slice(1).every((r) => r.crown.visible === false));
+    ok('party: the fallen row reads Dead over an emptied rail',
+      party.rows[3].stateText.visible === true && party.rows[3].stateText._text === 'Dead'
+      && party.rows[3].frame.health.cur === 0);
+    ok('party: the lost row dims and reads Offline',
+      party.rows[4].stateText._text === 'Offline' && party.rows[4].frame.fxOpacity === 0.45);
+
+    const targets = [];
+    party.on('target', (e) => targets.push(e.id));
+    const sounds = [];
+    const offSound = engine.bus.on('uisound', ({ kind }) => sounds.push(kind));
+    party.rows[1].dispatch('click', {});
+    ok('party: a click on a living frame commits loud target and rings it',
+      targets.join(',') === 'mora' && party.target === 'mora'
+      && party.rows[1].selEdges[0].fxOpacity > 0);
+    party.rows[3].dispatch('click', {});
+    ok('party: the fallen still answer — a dead frame targets',
+      targets.join(',') === 'mora,brack' && party.target === 'brack');
+    sounds.length = 0;
+    party.rows[4].dispatch('click', {});
+    ok('party: the lost refuse with the error voice, the target holds',
+      targets.join(',') === 'mora,brack' && party.target === 'brack' && sounds.includes('error'));
+    offSound();
+    ok('party: the readout follows the committed target', targetText._text === 'Target: Brack Tideman');
+
+    party.setMember('mora', { hp: 100 });
+    ok('party: a model patch commits through the frame rail',
+      party.rows[1].frame.health.cur === 100 && party.memberOf('mora').hp === 100);
+
+    party.setMember('mora', { leader: true });
+    ok('party: pass lead re-crowns exactly one row',
+      party.rows[1].crown.visible === true && party.rows[0].crown.visible === false
+      && party.members.filter((m) => m.leader).length === 1);
+    party.setMember('you', { leader: true });
+
+    // ---- the ready check: display over game truth ----
+    party.beginReadyCheck();
+    ok('ready: the check pends every reachable frame and skips the lost',
+      party.readyState('you') === 'pending' && party.readyState('brack') === 'pending'
+      && party.readyState('sela') === null && party.rows[4].readyChip.visible === false);
+    party.setReady('you', true);
+    party.setReady('brack', false);
+    ok('ready: the answers land as chips', party.readyState('you') === 'yes' && party.readyState('brack') === 'no');
+    party.clearReadyCheck();
+    ok('ready: standing down clears every chip',
+      party.readyState('you') === null && party.rows.every((r) => r.readyChip.visible === false));
+
+    // ---- the buff strip bubbles through the panel ----
+    const fxNames = [];
+    party.on('effectclick', (e) => fxNames.push(e.name));
+    const fx = party.rowOf('you').frame.effectsRow.children[0];
+    fx.dispatch('click', {});
+    ok('effects: the seated buff answers through the panel', fxNames.join(',') === 'Well Fed');
+
+    // ---- the group loop: remove, then refill from the roster ----
+    party.removeMember('sela');
+    ok('group: a removal shrinks the column and reflows it',
+      party.rows.length === 4 && party.h === 4 * 118 + 3 * 2);
+    inviteToGroup(byName('Odo Marsh'));
+    ok('group: the roster refills the fifth seat',
+      party.rows.length === 5 && party.members.some((m) => m.name === 'Odo Marsh'));
+
+    // ---- the roster: silent boot sort, legality, the verbs ----
+    ok('roster: the table boots name-sorted silently',
+      roster.sort.column === 0 && roster.sort.ascending === true
+      && roster.getRows()[0][0] < roster.getRows()[5][0]);
+    {
+      const canInit = rosterVerbsFor(byName('Rilke Stone'));   // an Initiate
+      const canGm = rosterVerbsFor(byName('Ivo Blackquay'));   // the Guildmaster
+      const canSelf = rosterVerbsFor(byName(YOU));
+      ok('roster: rank legality — an Initiate promotes, the master is untouchable, you cannot verb yourself',
+        canInit.promote === true && canInit.remove === true
+        && canGm.promote === false && canGm.demote === false && canGm.remove === false
+        && canSelf.whisper === false && canSelf.remove === false);
+    }
+    {
+      const ix = rosterIndexOfName('Rilke Stone');
+      const row = roster.rowNodes[ix].node;
+      row.dispatch('rightclick', { x: row.worldX + 40, y: row.worldY + 10, preventDefault: () => {} });
+      await wait(60);
+      ok('roster: a right-click on a row raises the menu', EldContextMenu.isOpen === true);
+      engine.bus.emit('keydown', { key: 'Escape' });
+      await wait(40);
+      ok('roster: Escape stands the menu down', EldContextMenu.isOpen === false);
+    }
+    {
+      const soul = byName('Rilke Stone');
+      const before = soul.rankIx;
+      const lines0 = chat.scrollback.entries.length;
+      promote(soul);
+      ok('roster: promote moves the rank, the cell, and the chat line',
+        soul.rankIx === before - 1
+        && roster.getRows()[rosterIndexOfName('Rilke Stone')][2] === RANKS[soul.rankIx]
+        && chat.scrollback.entries.length === lines0 + 1);
+    }
+    {
+      invite('Gull Testa');
+      ok('roster: an invitation writes a new Initiate into the book',
+        byName('Gull Testa') != null && rosterIndexOfName('Gull Testa') !== -1
+        && onlineText._text === `Online ${onlineCount()}/${guild.length}`);
+      inviteBtn.dispatch('click', {});
+      await wait(60);
+      ok('roster: the Invite button raises the prompt', EldPopup.isOpen === true);
+      engine.bus.emit('keydown', { key: 'Escape' });
+      await wait(60);
+    }
+    {
+      const soul = byName('Gull Testa');
+      removeFromGuild(soul);
+      await wait(60);
+      ok('roster: a removal asks first', EldPopup.isOpen === true);
+      EldPopup.hide(); // resolves as cancel — the strike must not land
+      await wait(60);
+      ok('roster: a cancelled removal keeps the soul in the book',
+        byName('Gull Testa') != null && rosterIndexOfName('Gull Testa') !== -1);
+    }
+
+    // ---- whisper prefill ----
+    prefillWhisper('Mora Quayle');
+    ok('whisper: the verb prefills the say box armed',
+      chat.field.value === '/w Mora Quayle ' && engine.focusedNode === chat.field);
+    chat.field.setValue('');
+    engine.setFocus(null);
+
+    // ---- the chat voices (the send rides the field's own Enter path) ----
+    const lastText = () => {
+      const es = chat.scrollback.entries;
+      const last = es[es.length - 1];
+      return ((last && last._segments) || []).map((s) => s.text || '').join('');
+    };
+    const send = async (line) => {
+      chat.focusInput(); // the field submits from its editing state (the Enter-law form)
+      await wait(30);
+      chat.field.setValue(line);
+      chat.field.dispatch('keydown', { key: 'Enter' });
+      await wait(40);
+    };
+    {
+      const n0 = chat.scrollback.entries.length;
+      channelSel.setValue('Guild');
+      await send('the tide holds');
+      ok('chat: a guild send lands with the guild voice',
+        chat.scrollback.entries.length === n0 + 1 && lastText().includes('[Guild]')
+        && lastText().includes('the tide holds'));
+      await send('/o quiet word');
+      ok('chat: /o routes one line through the officer voice',
+        lastText().includes('[Officer]') && lastText().includes('quiet word'));
+      await send('/w Mora meet me at the quay');
+      ok('chat: /w renders the whisper as To', lastText().includes('[To Mora]'));
+    }
+
+    // ---- the Enter law and the hotkey ----
+    engine.setFocus(null);
+    await wait(40);
+    engine.bus.emit('keydown', { key: 'Enter' });
+    await wait(40);
+    ok('enter: a free Enter arms the say box', engine.focusedNode === chat.field && chat.field._wantsTextInput === true);
+    await send('hail the hall');
+    ok('enter: the send hands the keyboard back', engine.focusedNode === null);
+
+    engine.bus.emit('keydown', { key: 'g' });
+    await wait(60);
+    ok('hotkey: G minimizes the guild window', guildWin.minimized === true);
+    engine.bus.emit('keydown', { key: 'g' });
+    await wait(60);
+    ok('hotkey: G restores it', guildWin.minimized === false);
+    // (type-vs-hotkey is the DRIVE's to prove: the typing guarantee lives in the
+    // input layer BELOW the bus — a synthetic bus emit bypasses the very door the
+    // law is about, so only real CDP keys can test it. The drive types "ggg ahoy".)
+    guildWin.close();
+    await wait(60);
+    engine.bus.emit('keydown', { key: 'g' });
+    await wait(60);
+    ok('hotkey: G re-opens a CLOSED guild window from nothing',
+      guildWin != null && guildWin.minimized === false);
+
+    // ---- the grip and the fit (the FREEDOM LAW) ----
+    ok('chat: the feed wears the house grip and NO element budgets it (the freedom law)',
+      chat.grip != null && chat.grip.maxW === Infinity && chat.grip.maxH === Infinity);
+    {
+      // the freedom drawn in blood: a real grip gesture grows the feed PAST the
+      // guild window's column (the old ceiling), then a second gesture returns it
+      const g = chat.grip;
+      const w0 = chat.w, h0 = chat.h;
+      const oldCeiling = guildWin.x - 290 - 16;
+      const c = { x: g.worldX + 12, y: g.worldY + 12 };
+      g.dispatch('pointerdown', { x: c.x, y: c.y, button: 0, pointerId: 81 });
+      g.dispatch('pointermove', { x: c.x + (oldCeiling - w0) + 200, y: c.y, pointerId: 81 });
+      g.dispatch('pointerup', { x: c.x + (oldCeiling - w0) + 200, y: c.y, button: 0, pointerId: 81, canceled: false });
+      await wait(60);
+      ok('chat: a grip gesture grows the feed past the guild window\'s column — nothing budgets it',
+        chat.w > oldCeiling && chat.w <= engine.width - 290 + 0.5);
+      const g2 = { x: g.worldX + 12, y: g.worldY + 12 };
+      g.dispatch('pointerdown', { x: g2.x, y: g2.y, button: 0, pointerId: 82 });
+      g.dispatch('pointermove', { x: g2.x - (chat.w - w0), y: g2.y, pointerId: 82 });
+      g.dispatch('pointerup', { x: g2.x - (chat.w - w0), y: g2.y, button: 0, pointerId: 82, canceled: false });
+      await wait(60);
+      engine.captures.clear();
+      ok('chat: the return gesture seats the boot width back', chat.w === w0 && chat.h === h0);
+    }
+    {
+      const h0 = chat.h, w0 = chat.w, y0 = chatHeader.worldY;
+      chat.setRect(chat.x, chat.y - 60, w0 + 40, h0 + 60); // a consumer resize IS a resize
+      await wait(80);
+      ok('chat: the header lane rides the grown feed (glued by inputs, not lag)',
+        chat.h === h0 + 60 && chatHeader.worldY === y0 - 60);
+      chat.setRect(290, engine.height - 58 - h0, w0, h0);
+      await wait(80);
+      ok('chat: the boot rect comes back and the header follows home',
+        chat.h === h0 && chat.w === w0 && chatHeader.worldY === y0);
+    }
+    ok('roster: the window is fitted, gripless, and stands no horizontal rail',
+      guildWin.resizable === false
+      && guildWin.contentArea.w >= roster.tableW
+      && guildWin.contentArea.hThumb?.visible !== true);
+
+    // ---- the ground circle ----
+    engine.bus.emit('pointerdown', { x: 600, y: 300, button: 2, pointerId: 97, target: null, native: null });
+    await wait(60);
+    ok('ground: a right-click on the open hall raises the wheel', ground.isOpen === true);
+    ground._setIndex(1, false); // Guild
+    ground.onActivate();
+    await wait(40);
+    ground._setIndex(0, false); // Roster
+    ground.onActivate();
+    await wait(80);
+    ok('ground: the nested Roster pick folds the window away',
+      ground.isOpen === false && guildWin.minimized === true);
+    engine.bus.emit('keydown', { key: 'g' });
+    await wait(40);
+
+    // ---- hit-reach: the real probe answers for the primary interactives ----
+    const reach = (n) => {
+      const h = hitTest(engine, n.worldX + n.w / 2, n.worldY + n.h / 2);
+      return h === n || (n.isAncestorOf ? n.isAncestorOf(h) : false);
+    };
+    ok('hit-reach: a party frame and the Ready Check button answer',
+      reach(party.rows[0]) && reach(readyBtn));
+    ok('hit-reach: the say box and the channel picker answer',
+      reach(chat.field) && reach(channelSel));
+
+    // ---- the construction budget: the kit is instance raster ----
+    {
+      const t0 = engine.textures.count;
+      const probe = new PartyPanel({ members: PARTY_SEED });
+      ok('budget: a fresh five-frame panel bakes zero atlas textures', engine.textures.count === t0);
+      probe.dispose();
+    }
+
+    // ---- the NaN/junk laws ----
+    {
+      const junk = new PartyPanel({ members: 'junk', gap: NaN });
+      const dup = new PartyPanel({ members: [{ id: 'a', name: 'A' }, { id: 'a', name: 'A again' }, { name: 'no id' }] });
+      ok('nan: junk members read as none and duplicate ids drop to one',
+        junk.rows.length === 0 && junk.gap === 4 && dup.rows.length === 1);
+      junk.dispose();
+      dup.dispose();
+    }
+
+    ok('close: no errors reached the console across the whole run', window.__errs.length === 0);
+
+    Eldritch.reducedMotion = false;
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;max-height:95vh;overflow:auto;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:10px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `SOCIALHUD ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+}
+</script>
+</body>
+</html>

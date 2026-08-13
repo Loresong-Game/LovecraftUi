@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Big Data</title>
+<!-- @demo   Ten thousand things: a log firehose, a 5k-row table with live sort, and a focusable 10k list — all pooled, on the desk of a harbour tide office.
+     @shows  EldWindow, EventLog, Table, VirtualList, EldToast, RadialMenu, Button, ToggleLabel, TextNode, UINode, QuadNode
+     @params ?freeze=1 — bit-stable snapshot boot (the tide holds, seeded lines) · ?assert=1 — the in-page suite titles its own PASS count -->
+
+<!-- the flagship. The Deluge appends log lines continuously into a WINDOWED
+     EventLog (unbounded history, one screenful of nodes — the counter tells the
+     truth). The Ledger of Things is a 5,000-row virtual Table whose header clicks
+     sort the FULL model live. The Procession is a 10,000-item VirtualList wearing
+     the row-focus contract: Tab to it once, then arrows (and Home/End) walk every
+     item across the window boundary; Enter toasts the one under the wash. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {
+  Eldritch, EldWindow, EldToast,
+  EventLog, Table, VirtualList,
+  Button, ToggleLabel, RadialMenu,
+  UINode, QuadNode, TextNode,
+  runAudit, COLORS, FONTS,
+} from '../src/lovecraft-ui.js';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+// INSTRUMENTED (the arcade/meters idiom): every census boot reads a RESTING office —
+// the tide used to run through ?audit/?torture/?resize, a moving denominator.
+const INSTRUMENTED = FROZEN || ASSERT
+  || params.has('audit') || params.has('torture') || params.has('resize');
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+
+// ---- the icon pack (optional download): the RE-SKIN idiom ----
+// `as:` points at icon ids this page ALREADY uses, so the registry re-bakes those NAMES
+// in place: every live quad follows with no page code and no atlas movement.
+// `fallback: 'none'` leaves the procedural art standing when assets/ is absent, which is
+// the shipped default - the pack is an optional download and the page must not need it.
+// Skipped under FROZEN: --screenshot captures at the load event and cannot wait for an
+// async decode, so frozen baselines run on the procedural art by necessity.
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-3649', as: 'book' },
+      { id: 'ico-0210', as: 'shield' },
+      { id: 'ico-0513', as: 'sword' },
+      { id: 'ico-0489', as: 'blindinglight' },
+      { id: 'ico-0707', as: 'arrows' },
+      { id: 'ico-0307', as: 'leafs' },
+      { id: 'ico-0394', as: 'deathkiss' },
+      { id: 'ico-0017', as: 'fireball' },
+      { id: 'ico-0078', as: 'fireball2' },
+    ],
+  });
+}
+
+window.engine = engine;
+
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+const nf = new Intl.NumberFormat('en-US');
+
+// ---- the tide office: ONE page-owned canvas, registry-free ----
+// The three instruments used to hug the top left of the frame over the default
+// ambient, leaving the bottom and the right quarter - about 45% of the screen -
+// carrying nothing at all. They are sound instruments; they were just dumped in a
+// corner of a black room. Now there is a room, and they fill it.
+const office = new UINode({ name: 'tide-office' });
+const oCanvas = document.createElement('canvas');
+const oTex = new THREE.CanvasTexture(oCanvas);
+oTex.colorSpace = THREE.SRGBColorSpace;
+oTex.minFilter = THREE.LinearFilter;
+oTex.magFilter = THREE.LinearFilter;
+oTex.generateMipmaps = false;
+const oQuad = new QuadNode({ texture: oTex });
+office.add(oQuad);
+engine.layers.background.add(office);
+office.on('dispose', () => oTex.dispose());
+const srnd = (n) => { let s = n; return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff; };
+
+function paintOffice() {
+  const W = Math.max(2, Math.round(engine.width)), H = Math.max(2, Math.round(engine.height));
+  if (oCanvas.width !== W || oCanvas.height !== H) { oCanvas.width = W; oCanvas.height = H; }
+  const ctx = oCanvas.getContext('2d');
+  ctx.fillStyle = '#0b100f';
+  ctx.fillRect(0, 0, W, H);
+
+  // plaster over lath: flat value, courses carried by shadow and ONE lit edge
+  const r = srnd(5507);
+  for (let y = -6; y < H; y += 52) {
+    ctx.fillStyle = 'rgba(0,0,0,0.34)';
+    ctx.fillRect(0, y, W, 52);
+    ctx.fillStyle = `rgba(21,27,25,${0.88 + r() * 0.12})`;
+    ctx.fillRect(0, y + 3, W, 46);
+    ctx.strokeStyle = 'rgba(72,84,76,0.09)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, y + 3.5); ctx.lineTo(W, y + 3.5); ctx.stroke();
+  }
+
+  // the tide board: chalked columns and a struck-through week, high on the wall
+  const c = srnd(2917);
+  const bx = Math.round(W * 0.055), by = Math.round(H * 0.055), bw = Math.round(W * 0.30), bh = 96;
+  ctx.fillStyle = 'rgba(6,10,9,0.55)';
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.strokeStyle = 'rgba(70,82,74,0.16)'; ctx.lineWidth = 2;
+  ctx.strokeRect(bx + 1, by + 1, bw - 2, bh - 2);
+  ctx.strokeStyle = 'rgba(200,210,196,0.10)'; ctx.lineWidth = 1;
+  for (let i = 1; i < 7; i++) {
+    const x = Math.round(bx + (i * bw) / 7) + 0.5;
+    ctx.beginPath(); ctx.moveTo(x, by + 8); ctx.lineTo(x, by + bh - 8); ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(200,210,196,0.16)'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (let i = 0; i <= 7; i++) {
+    const x = bx + 10 + (i * (bw - 20)) / 7;
+    const y = by + 20 + c() * (bh - 44);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(190,120,110,0.16)';
+  ctx.beginPath(); ctx.moveTo(bx + 12, by + bh - 16); ctx.lineTo(bx + bw * 0.42, by + 14); ctx.stroke();
+
+  // the tall shuttered window on the right, rain running down the harbour behind it
+  const wx = Math.round(W * 0.80), wy = Math.round(H * 0.10), ww = Math.round(W * 0.15), wh = Math.round(H * 0.46);
+  ctx.fillStyle = '#060c10';
+  ctx.fillRect(wx, wy, ww, wh);
+  const glow = ctx.createLinearGradient(wx, wy, wx, wy + wh);
+  glow.addColorStop(0, 'rgba(88,150,170,0.06)');
+  glow.addColorStop(1, 'rgba(88,150,170,0.015)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(wx, wy, ww, wh);
+  const rn = srnd(8123);
+  ctx.strokeStyle = 'rgba(170,200,210,0.09)'; ctx.lineWidth = 1;
+  for (let i = 0; i < 44; i++) {
+    const x = wx + rn() * ww, y = wy + rn() * wh;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - 2, y + 16); ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(66,76,68,0.85)'; ctx.lineWidth = 6;
+  ctx.strokeRect(wx, wy, ww, wh);
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(wx + ww / 2, wy); ctx.lineTo(wx + ww / 2, wy + wh);
+  for (let i = 1; i < 4; i++) { const y = wy + (i * wh) / 4; ctx.moveTo(wx, y); ctx.lineTo(wx + ww, y); }
+  ctx.stroke();
+
+  // the lamp over the desk, and the desk edge the instruments stand on
+  const lx = Math.round(W * 0.44), ly = Math.round(H * 0.06);
+  const pool = ctx.createRadialGradient(lx, ly, 12, lx, ly, Math.max(W, H) * 0.62);
+  pool.addColorStop(0, 'rgba(232,216,106,0.13)');
+  pool.addColorStop(0.5, 'rgba(232,216,106,0.035)');
+  pool.addColorStop(1, 'rgba(232,216,106,0)');
+  ctx.fillStyle = pool;
+  ctx.fillRect(0, 0, W, H);
+  const dt = Math.round(H * 0.90);
+  ctx.fillStyle = '#150f0c';
+  ctx.fillRect(0, dt, W, H - dt);
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, dt, W, 6);
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 1;
+  for (let i = 1; i < 7; i++) {
+    const y = Math.round(dt + (i * (H - dt)) / 7) + 0.5;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  oTex.needsUpdate = true;
+}
+// ZERO-SIZED wrapper: a sized full-screen node overlaps every sibling in the census.
+office.onLayout = function () {
+  oQuad.setRect(0, 0, Math.round(engine.width), Math.round(engine.height));
+  paintOffice();
+};
+
+// ---- the desk: three instruments sized from the FRAME, not from a corner ----
+const DESK = (() => {
+  const W = Math.round(engine.width), H = Math.round(engine.height);
+  const M = 34, GUT = 16, TOP = 52, TASKBAR = 46;
+  const h = Math.max(240, H - TASKBAR - 20 - TOP);
+  const leftW = Math.max(340, Math.round((W - M * 2 - GUT) * 0.41));
+  const rightX = M + leftW + GUT;
+  const rightW = Math.max(340, W - M - rightX);
+  const topH = Math.round((h - GUT) / 2);
+  return { x: M, y: TOP, leftW, rightX, rightW, h, topH,
+           botY: TOP + topH + GUT, botH: h - topH - GUT };
+})();
+// EldWindow chrome eats roughly this much of the box; the contents are sized against
+// the remainder so a taller window shows MORE ROWS instead of more empty frame.
+const inW = (w) => Math.max(120, w - 40);
+const inH = (h) => Math.max(80, h - 64);
+
+// ---- The Deluge: a firehose into a windowed scrollback ----
+let deluge = null;
+EldWindow.create({
+  id: 'firehose', title: 'Event Log — live feed', x: DESK.x, y: DESK.y, width: DESK.leftW, height: DESK.topH,
+  minWidth: 380, minHeight: 240,
+  content: (c) => {
+    // laid out from the BOTTOM up: the toggle and the counter claim their rows first
+    // and the scrollback takes whatever is left, so it can never push them past the sill
+    const cw = inW(DESK.leftW), ch = inH(DESK.topH);
+    const logH = Math.max(90, ch - 60);
+    const log = new EventLog({ width: cw - 8, height: logH, virtual: true, markup: true, register: false });
+    log.setPos(4, 6); // 4 + (cw-8) sits inside the frame's content box (10 overflowed it by 2)
+    c.add(log);
+
+    const counter = new TextNode('', { font: FONTS.mono, size: 12, color: COLORS.positive, shadow });
+    counter.setPos(4, 6 + logH + 8);
+    c.add(counter);
+
+    let flowing = true;
+    const pause = new ToggleLabel('The tide flows (twenty lines a second)', {
+      checked: true,
+      onChange: (v) => { flowing = v; },
+    });
+    pause.setPos(4, 6 + logH + 30);
+    c.add(pause);
+
+    const OMENS = ['tide', 'bell', 'lantern', 'depth', 'chorus', 'gate'];
+    let n = 0, acc = 0;
+    // the tick is exposed so the suite can clock the tide by hand (the ambient
+    // rule: the firehose boots cold under FROZEN/ASSERT — live lines carry
+    // wall-clock stamps and twenty lines a second holds no baseline)
+    const tick = (dt) => {
+      if (!flowing) return;
+      acc += dt;
+      while (acc >= 0.05) {
+        acc -= 0.05;
+        n++;
+        const omen = OMENS[n % OMENS.length];
+        log.log(n % 50 === 0
+          ? `Reading ${nf.format(n)}: the {color:#e8c86a}${omen}{/} turns {icon:book}`
+          : `Reading ${nf.format(n)}: the ${omen} holds`, 'TIDE');
+      }
+      counter.setText(`${nf.format(log.entries.length)} lines held - ${log.scroll.poolSize} row nodes on the GPU`);
+    };
+    engine.ticker.add((dt) => { if (!INSTRUMENTED) tick(dt); });
+    if (FROZEN) {
+      for (let i = 1; i <= 3; i++) log.append('[--:--:--]', 'TIDE', `Reading ${i}: the ${OMENS[i % OMENS.length]} holds`);
+      counter.setText('3 lines held - the tide waits');
+    }
+    deluge = { log, counter, pause, tick };
+  },
+});
+
+// ---- The Ledger of Things: 5,000 rows, live full-model sort ----
+const KINDS = ['relic', 'tome', 'idol', 'bone', 'chart', 'key'];
+let ledger = null;
+EldWindow.create({
+  id: 'ledger', title: 'Item Table — 5,000 rows', x: DESK.rightX, y: DESK.y, width: DESK.rightW, height: DESK.h,
+  minWidth: 420, minHeight: 320,
+  content: (c) => {
+    const cw = inW(DESK.rightW), ch = inH(DESK.h);
+    const rows = Array.from({ length: 5000 }, (_, i) => [
+      `Curio ${i + 1}`,
+      String(((i * 7919) % 4999) + 1),
+      KINDS[(i * 31) % KINDS.length],
+    ]);
+    // columns and the pooled viewport both come from the live box, so a wider desk
+    // shows a wider ledger and a taller one shows MORE ROWS - not more empty frame
+    const nameW = Math.max(150, cw - 20 - 150 - 150);
+    const viewH = Math.max(160, ch - 66);
+    const table = new Table({
+      virtual: viewH,
+      columns: [{ label: 'Name', width: nameW }, { label: 'Worth', width: 150 }, { label: 'Kind', width: 150 }],
+      rows,
+    });
+    table.setPos(10, 6);
+    c.add(table);
+    const cap = new TextNode('5,000 rows - one screenful of nodes.', {
+      size: 11, color: COLORS.textFaint, shadow,
+    });
+    cap.setPos(10, 6 + 36 + viewH + 8);
+    c.add(cap);
+    ledger = { table };
+  },
+});
+
+// ---- The Procession: ten thousand focusable things ----
+let procession = null;
+EldWindow.create({
+  // the bottom of the left column; DESK reserves the taskbar strip, which is what the
+  // old hard-coded y 332 was hand-solving for at 1024x640
+  id: 'procession', title: 'Pilgrim List — 10,000 items', x: DESK.x, y: DESK.botY,
+  width: DESK.leftW, height: DESK.botH, minWidth: 380, minHeight: 190,
+  content: (c) => {
+    const cw = inW(DESK.leftW), ch = inH(DESK.botH);
+    const items = Array.from({ length: 10000 }, (_, i) => ({
+      name: `Pilgrim ${nf.format(i + 1)}`,
+      sigil: KINDS[(i * 17) % KINDS.length],
+    }));
+    const list = new VirtualList({
+      rowH: 24, rowFocus: true,
+      renderRow: (node, item) => {
+        if (!node._name) {
+          node._name = new TextNode('', { size: 13, color: COLORS.text, shadow });
+          node._name.setPos(8, 4);
+          node._sigil = new TextNode('', { font: FONTS.mono, size: 11, color: COLORS.textMuted, shadow });
+          node._sigil.setPos(320, 6);
+          node.add(node._name, node._sigil);
+        }
+        node._name.setText(item.name);
+        node._sigil.setText(item.sigil);
+      },
+    });
+    list.setRect(4, 26, cw - 8, Math.max(72, ch - 32)); // 4 + (cw-8) fits the content box
+    list.setItems(items);
+    c.add(list);
+    list.on('rowactivate', (e) => EldToast.show({
+      title: e.item.name, message: `Bearer of the ${e.item.sigil}.`, icon: 'book', duration: 3,
+    }));
+
+    const cap = new TextNode('Ten thousand walk; one screenful stands.', {
+      size: 11, color: COLORS.textFaint, maxWidth: cw - 16, ellipsis: true, shadow,
+    });
+    cap.setPos(10, 6);
+    c.add(cap);
+    procession = { list };
+  },
+});
+
+// ---- the ground circle: right-click on the desk opens the wheel —
+// the jump verbs the 10k procession answers (the pooled truth: a jump costs
+// one screenful), from anywhere on the tide office floor.
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'jump', label: 'Jump', children: [
+ { id: 'top', label: 'Top' },
+ { id: 'bottom', label: 'Bottom' },
+ ] },
+ ],
+});
+ground.on('select', ({ id, path }) => {
+  if (path[0] !== 'jump' || !procession) return;
+  procession.list.scrollToIndex(id === 'top' ? 0 : 9999);
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+// the page's FIRST handle bag — the wheel needed a drive-visible name
+window.__bigdata = { ground: () => ground, procession: () => procession };
+
+// ---- ?assert=1: the in-page suite (the pooled truth, clocked by hand) ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    try {
+    await wait(600);
+
+    const audit = runAudit(engine);
+    const cts = audit.counts;
+    const v0 = audit.violations[0];
+    // every rule, not a hand-list: a five-name sum silently exempts whatever rule
+    // lands next (reach, the sixth, was invisible to it)
+    ok(`the page audits clean on every rule${v0 ? ` [${v0.rule} ${v0.path} ${v0.detail ?? ''}]` : ''}`,
+      Object.values(cts).reduce((a, b) => a + b, 0) === 0);
+
+    // one hand-clocked pulse lands exactly one line, and the counter tells it —
+    // EXACTLY: '1 lines held'.includes also matched '21 lines held', a substring
+    // probe on a number, so the counter is related to the ledger it reports
+    const n0 = deluge.log.entries.length;
+    deluge.tick(0.05);
+    await wait(80);
+    ok('a clocked pulse lands one line and the counter tells it exactly',
+      deluge.log.entries.length === n0 + 1
+      && deluge.counter._text.startsWith(`${nf.format(deluge.log.entries.length)} lines held`));
+
+    // the pause gate holds the tide (a LOUD setChecked — the toggle's onChange
+    // is a commitChange callback, so dispatch alone would miss it)
+    deluge.pause.setChecked(false, { silent: false });
+    deluge.tick(0.5);
+    await wait(80);
+    const held = deluge.log.entries.length === n0 + 1;
+    deluge.pause.setChecked(true, { silent: false });
+    ok('the pause gate holds the tide', held);
+
+    // THE PAGE'S THESIS, finally asserted: the histories are unbounded, the nodes
+    // are not. All three instruments could materialize their five and ten thousand
+    // and 6/6 stayed green — poolSize (public) is the pooled claim.
+    deluge.tick(5); // a hundred pulses at the tide's own twenty-a-second clock
+    await wait(120);
+    // the bounds derive from the DATA the thesis names, not a bare 40
+    // (the same release deleted tycoon's bare 40 while these three shipped) —
+    // and the growth arm below is the claim itself: the flood doubles, no pool moves
+    const pools376 = [deluge.log.scroll.poolSize, ledger.table.vlist.poolSize, procession.list.poolSize];
+    ok('the deluge pools one screenful under the flood',
+      deluge.log.entries.length >= 100 && pools376[0] < deluge.log.entries.length / 2);
+    ok('the ledger pools one screenful under five thousand rows',
+      pools376[1] < 5000 / 100 && ledger.table.rowsData.length === 5000);
+    ok('the procession pools one screenful under ten thousand pilgrims',
+      pools376[2] < 10000 / 100 && procession.list.items.length === 10000);
+    deluge.tick(5); // the flood doubles; the screenful must not
+    await wait(120);
+    ok('the histories grew and no pool did (the pooled claim, behaviorally)',
+      deluge.log.entries.length >= 200 && deluge.log.scroll.poolSize === pools376[0]
+      && procession.list.poolSize === pools376[2] && ledger.table.vlist.poolSize === pools376[1]);
+
+    // the header sort orders the FULL five-thousand-row model, both directions
+    ledger.table.sortByColumn(1);
+    await wait(150);
+    const rd = ledger.table.rowsData;
+    const asc = Number(rd[0][1]) <= Number(rd[1][1]) && Number(rd[1][1]) <= Number(rd[2][1]);
+    ledger.table.sortByColumn(1); // the same header flips the direction
+    await wait(150);
+    const rd2 = ledger.table.rowsData; // re-read: the sort may replace the array
+    const desc = Number(rd2[0][1]) >= Number(rd2[1][1]);
+    ok('the sort orders the full model both ways', asc && desc && rd2.length === 5000);
+
+    // the focus walk crosses the window boundary to the ten-thousandth — driven
+    // through the REAL key plane (canvas focus + a real End), the action-hud idiom.
+    // The old drive wrote _setFocusIndex(9999) and read focusIndex back: a private
+    // tautology that proved neither the keys nor the scroll.
+    const list = procession.list;
+    const scroll0 = list.content.scrollY;
+    engine.focus.set(list, 'key');
+    engine.canvas.focus();
+    engine.canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+    await wait(150);
+    ok('a real End walks focus to the ten-thousandth and the window follows',
+      list.focusIndex === 9999 && list.items[9999].name === 'Pilgrim 10,000'
+      && list.content.scrollY > scroll0);
+
+    // a real Enter through the same plane greets the pilgrim — the page's own
+    // toast wiring, no synthesized 'rowactivate'
+    const toasts0 = EldToast.live.length;
+    engine.canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await wait(150);
+    const greeted = EldToast.live[EldToast.live.length - 1];
+    ok('a real Enter greets the pilgrim under the wash',
+      EldToast.live.length === toasts0 + 1 && greeted?.titleNode?._text === 'Pilgrim 10,000');
+
+    // the ground circle: right-click on the desk opens the wheel, and
+    // the nested Jump>Top pick re-seats the 10k procession at its head
+    procession.list.scrollToIndex(9999);
+    await wait(60);
+    engine.bus.emit('pointerdown', { x: 640, y: 640, button: 2, pointerId: 71, target: null, native: null });
+    await wait(60);
+    ok('ground: a right-click on the desk opens the wheel', window.__bigdata.ground().isOpen === true);
+    window.__bigdata.ground()._setIndex(0, false); // Jump
+    window.__bigdata.ground().onActivate();
+    await wait(40);
+    window.__bigdata.ground()._setIndex(0, false); // Top
+    window.__bigdata.ground().onActivate();
+    await wait(80);
+    ok('ground: the nested Top pick re-seats the pooled list at its head',
+      window.__bigdata.ground().isOpen === false && procession.list.content.scrollY === 0);
+
+    // the boot-health hooks are part of the contract: a suite that went green while
+    // an error rode the title would be measuring the wrong thing
+    ok('the page runs error-free end to end', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `BIGDATA ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+    } catch (err) {
+      document.title = 'BIGDATA ASSERT FAIL threw: ' + String(err?.message ?? err).slice(0, 60);
+    }
+  })();
+} else {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'BIGDATA READY';
+  }, 1000);
+}
+</script>
+</body>
+</html>

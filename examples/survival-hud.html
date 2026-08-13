@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Survival HUD</title>
+<!-- @demo   The Long Winter: a camp on a snowfield where the day actually turns — drag to swing the treeline, warmth drains faster after dark, and the chest, the campfire and the recipe browser all read one larder.
+     @shows  RecipeBrowser, ProcessPanel, CompassStrip, DayDial, ItemGrid, ResourceBar, RadialMenu, EldWindow, EldNotify, EldToast, Button, VBox, HBox, TextNode, UINode, QuadNode
+     @params ?freeze=1 — bit-stable snapshot boot (no ambiance, campfire cold, the day held at 0.35) · ?assert=1 — the in-page suite titles its own PASS count · ?torture=1 / ?audit=1 / ?resize=1 — the camp clock parks for every census -->
+
+<!-- the proof page (the design requirement's proof at page level: the body meters ride
+ the chip redesign — full-height edge-justified plates, art baked AT chip
+ size). Shift-click stacks between the satchel and the chest (or Take All /
+     Deposit All), drag a fish and wood into the campfire and watch the arrow fill,
+     craft cloaks from pelts in the browser (the PAGE decrements the satchel — the
+     data-driven protocol), and drag the heading slider to swing the compass past
+     the 359→0 wrap. Body meters warn by STATIC tier, never a pulse. The campfire
+     ticker boots cold under FROZEN/ASSERT (the ambient-ticker rule); the suite
+     clocks one cook by hand. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {
+  Eldritch, RecipeBrowser, ProcessPanel, CompassStrip, DayDial, ItemGrid, ResourceBar,
+  RadialMenu, EldWindow, EldNotify, EldToast, Button, VBox, HBox, TextNode, UINode, QuadNode,
+  runAudit, COLORS, FONTS,
+} from '../src/lovecraft-ui.js';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+// INSTRUMENTED (the arcade/meters idiom): the camp's clock parks for every census.
+const INSTRUMENTED = FROZEN || ASSERT
+  || params.has('audit') || params.has('torture') || params.has('resize');
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+
+// ---- the icon pack (optional download): the RE-SKIN idiom ----
+// `as:` points at icon ids this page ALREADY uses, so the registry re-bakes those NAMES
+// in place: every live quad follows with no page code and no atlas movement.
+// `fallback: 'none'` leaves the procedural art standing when assets/ is absent, which is
+// the shipped default - the pack is an optional download and the page must not need it.
+// Skipped under FROZEN: --screenshot captures at the load event and cannot wait for an
+// async decode, so frozen baselines run on the procedural art by necessity.
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-3649', as: 'book' },
+      { id: 'ico-0210', as: 'shield' },
+      { id: 'ico-0513', as: 'sword' },
+      { id: 'ico-0489', as: 'blindinglight' },
+      { id: 'ico-0707', as: 'arrows' },
+      { id: 'ico-0307', as: 'leafs' },
+      { id: 'ico-0394', as: 'deathkiss' },
+      { id: 'ico-0017', as: 'fireball' },
+      { id: 'ico-0078', as: 'fireball2' },
+    ],
+  });
+}
+
+window.engine = engine;
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+
+// ---- the camp: ONE page-owned canvas, repainted when the LIGHT changes ----
+// The long winter used to be a set of panels floating on black with a raw slider
+// underneath the compass to turn it by hand. There is a camp now, and the day dial
+// actually drives it: dayT walks 0..1, the sky and the snow re-light as it goes, and
+// the repaint is throttled to a light STEP rather than a frame, so a full day costs
+// about a hundred paints instead of thousands.
+let dayT = 0.35;           // 0 = midnight, 0.5 = noon (the DayDial contract)
+let heading = 340;
+const camp = new UINode({ name: 'the-camp' });
+const bdCanvas = document.createElement('canvas');
+const bdTex = new THREE.CanvasTexture(bdCanvas);
+bdTex.colorSpace = THREE.SRGBColorSpace;
+bdTex.minFilter = THREE.LinearFilter;
+bdTex.magFilter = THREE.LinearFilter;
+bdTex.generateMipmaps = false;
+const bdQuad = new QuadNode({ texture: bdTex });
+camp.add(bdQuad);
+engine.layers.background.add(camp);
+camp.on('dispose', () => bdTex.dispose());
+const srnd = (n) => { let s = n; return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff; };
+const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+const rgb = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+
+function paintCamp() {
+  const W = Math.max(2, Math.round(engine.width)), H = Math.max(2, Math.round(engine.height));
+  if (bdCanvas.width !== W || bdCanvas.height !== H) { bdCanvas.width = W; bdCanvas.height = H; }
+  const ctx = bdCanvas.getContext('2d');
+  // daylight: 0 at midnight, 1 at noon, and the sky/snow lerp between two palettes
+  // The light range is deliberately NARROW and dark. The first pass ran snow up to
+  // (128,142,146) at noon and the field read as a flat grey wash fighting every
+  // widget on top of it - STYLE section 5's palette is dark, and a Lovecraftian
+  // winter noon is still dusk. Day only ever lifts this to a dim blue-grey.
+  const light = Math.max(0, Math.min(1, 1 - Math.abs(dayT - 0.5) * 2.6));
+  const skyHi = mix([5, 8, 12], [22, 32, 38], light);
+  const skyLo = mix([9, 14, 18], [52, 64, 66], light);
+  const snowC = mix([18, 24, 28], [70, 80, 84], light);
+  const horizon = Math.round(H * 0.40);
+  ctx.clearRect(0, 0, W, H);
+
+  const sky = ctx.createLinearGradient(0, 0, 0, horizon);
+  sky.addColorStop(0, rgb(skyHi, 1));
+  sky.addColorStop(1, rgb(skyLo, 1));
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, horizon);
+
+  // EVERYTHING DISTANT PANS WITH THE HEADING, AT ITS OWN RATE.
+  //
+  // Only the treeline used to move, so dragging read as "the trees fly around and
+  // nothing else does" — a broken effect rather than a turning camera. A turn is only
+  // legible as a turn when layers move TOGETHER and at different speeds: the stars
+  // barely, the trees plainly, the near drifts fastest.
+  const pan = ((heading % 360) / 360) * W * 2;
+  const wrap = (v, span) => { const m = v % span; return m < 0 ? m + span : m; };
+
+  // stars, only once the sky is dark enough to hold them
+  if (light < 0.35) {
+    const sr = srnd(4404);
+    ctx.fillStyle = `rgba(200,225,215,${(0.35 - light) * 0.9})`;
+    for (let i = 0; i < 90; i++) {
+      const x = wrap(sr() * W - pan * 0.18, W); // the sky is far: it drifts
+      ctx.fillRect(x, sr() * horizon * 0.9, 1.5, 1.5);
+    }
+  }
+
+  // the treeline: black conifers marching along the horizon
+  const tr = srnd(9091);
+  ctx.fillStyle = rgb(mix([4, 7, 6], [14, 22, 18], light), 1);
+  for (let i = 0; i < 90; i++) {
+    const bx = ((i * 61 + tr() * 30) - pan) % (W + 240);
+    const x = bx < -120 ? bx + W + 240 : bx;
+    const th = 40 + tr() * 70, tw = 16 + tr() * 16;
+    // three stacked skirts, not one spike: a conifer reads by its tiers
+    for (let k = 0; k < 3; k++) {
+      const f = 1 - k * 0.3;
+      const top = horizon + 6 - th * (0.42 + k * 0.29);
+      ctx.beginPath();
+      ctx.moveTo(x + tw / 2, top - th * 0.24);
+      ctx.lineTo(x + tw / 2 + (tw / 2) * f, top + th * 0.22);
+      ctx.lineTo(x + tw / 2 - (tw / 2) * f, top + th * 0.22);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.fillRect(x + tw / 2 - 1.5, horizon - 4, 3, 10);
+  }
+
+  // the snowfield, brightening toward the camp
+  const snow = ctx.createLinearGradient(0, horizon, 0, H);
+  snow.addColorStop(0, rgb(mix(snowC, [0, 0, 0], 0.55), 1));
+  snow.addColorStop(1, rgb(snowC, 1));
+  ctx.fillStyle = snow;
+  ctx.fillRect(0, horizon, W, H - horizon);
+  // drifts and old tracks
+  const dr = srnd(1213);
+  for (let i = 0; i < 70; i++) {
+    const y = horizon + 10 + dr() * (H - horizon - 20);
+    // near ground moves FASTEST — the parallax that makes a turn read as a turn
+    const depth = 0.5 + ((y - horizon) / Math.max(1, H - horizon)) * 1.6;
+    const x = wrap(dr() * W - pan * depth, W + 200) - 100;
+    const rw = 20 + dr() * 90;
+    ctx.fillStyle = `rgba(255,255,255,${0.012 + dr() * 0.022})`;
+    ctx.beginPath(); ctx.ellipse(x, y, rw, rw * 0.14, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  // the fire pit: a ring of stones and the light it throws on the snow
+  const fx = Math.round(W * 0.78), fy = Math.round(H * 0.62);
+  const glow = ctx.createRadialGradient(fx, fy, 8, fx, fy, 300);
+  glow.addColorStop(0, 'rgba(232,160,70,0.17)');
+  glow.addColorStop(0.45, 'rgba(232,160,70,0.055)');
+  glow.addColorStop(1, 'rgba(232,160,70,0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(fx - 300, fy - 300, 600, 600);
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 9) * Math.PI * 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.beginPath(); ctx.ellipse(fx + Math.cos(a) * 34, fy + Math.sin(a) * 13 + 3, 8, 5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(74,84,78,0.8)';
+    ctx.beginPath(); ctx.ellipse(fx + Math.cos(a) * 34, fy + Math.sin(a) * 13, 8, 5, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.fillStyle = 'rgba(232,160,70,0.5)';
+  ctx.beginPath(); ctx.ellipse(fx, fy, 16, 7, 0, 0, Math.PI * 2); ctx.fill();
+  // the tent, pitched away from the wind
+  const tx = Math.round(W * 0.17), ty = Math.round(H * 0.70);
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.beginPath(); ctx.ellipse(tx, ty + 8, 104, 14, 0, 0, Math.PI * 2); ctx.fill();
+  // the lit face, then the shaded one: a flat triangle reads as a shape, not a tent
+  ctx.fillStyle = rgb(mix([20, 24, 23], [46, 52, 48], light), 1);
+  ctx.beginPath(); ctx.moveTo(tx - 90, ty); ctx.lineTo(tx, ty - 84); ctx.lineTo(tx + 14, ty); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = rgb(mix([12, 15, 15], [30, 35, 33], light), 1);
+  ctx.beginPath(); ctx.moveTo(tx + 14, ty); ctx.lineTo(tx, ty - 84); ctx.lineTo(tx + 90, ty); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)';                  // the ridge pole
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(tx, ty - 84); ctx.lineTo(tx, ty); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(tx, ty - 84); ctx.lineTo(tx + 22, ty - 94); ctx.stroke();
+  ctx.fillStyle = '#05080a';                             // the flap, open on the dark
+  ctx.beginPath(); ctx.moveTo(tx - 22, ty); ctx.lineTo(tx - 4, ty - 50); ctx.lineTo(tx + 8, ty); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(232,160,70,0.10)';               // a little light inside it
+  ctx.beginPath(); ctx.moveTo(tx - 16, ty); ctx.lineTo(tx - 5, ty - 36); ctx.lineTo(tx + 3, ty); ctx.closePath(); ctx.fill();
+  bdTex.needsUpdate = true;
+}
+let paintedLight = -1, paintedPan = -1;
+function repaintIfChanged() {
+  const l = Math.round(dayT * 120), p = Math.round(heading);
+  if (l === paintedLight && p === paintedPan) return;
+  paintedLight = l; paintedPan = p;
+  paintCamp();
+}
+// zero-sized wrapper: a full-screen node beside the HUD siblings overlaps every one
+camp.onLayout = function () {
+  bdQuad.setRect(0, 0, engine.width, engine.height);
+  paintedLight = -1;
+  repaintIfChanged();
+};
+
+// ---- the larder: registered goods ----
+Eldritch.registerItem('pelt', { name: 'Winter Pelt', icon: 'leafs', stackMax: 10 });
+Eldritch.registerItem('fish', { name: 'Pale Fish', icon: 'arrows', stackMax: 5 });
+Eldritch.registerItem('cooked_fish', { name: 'Smoked Fish', icon: 'fireball', rarity: 'rare', stackMax: 5 });
+Eldritch.registerItem('wood', { name: 'Drift Timber', icon: 'book', stackMax: 20 });
+Eldritch.registerItem('cloak', { name: 'Pelt Cloak', icon: 'shield', rarity: 'rare', stackMax: 1 });
+
+// ---- body meters: STATIC warn tiers (STYLE §9 — never a pulse) ----
+const meters = new ResourceBar({ chips: [
+  { icon: 'fireball', value: 62, cap: 100, warnAt: 25, width: 110 }, // warmth
+  { icon: 'leafs', value: 41, cap: 100, warnAt: 20, width: 110 },    // hunger
+  { icon: 'arrows', value: 78, cap: 100, warnAt: 20, width: 110 },   // thirst
+], gap: 8 });
+meters.setPos(16, 12);
+engine.layers.background.add(meters);
+// The three chips were icon-only: "warmth", "hunger" and "thirst" existed ONLY in the
+// code comments above, so on screen they were three anonymous bars. STYLE 1a.1 — if the
+// label is not on the screen, the control does not have one.
+const METER_LABELS = ['Warmth', 'Hunger', 'Thirst'].map((t, i) => {
+  const n = new TextNode(t, { size: 10, color: COLORS.textMuted, shadow });
+  n.setPos(16 + i * 118, 42);
+  engine.layers.background.add(n);
+  return n;
+});
+
+// ---- the compass: heading tape + bearing markers ----
+const compass = new CompassStrip({
+  width: 340, heading,
+  markers: [{ bearing: 15 }, { bearing: 250, color: COLORS.negative }],
+});
+engine.layers.background.add(compass);
+// say that the world turns, and how. The drag was the page's main verb and nothing
+// anywhere on screen mentioned it.
+const turnHint = new TextNode('Drag the snow to turn', { size: 10, color: COLORS.textFaint, shadow });
+engine.layers.background.add(turnHint);
+
+// the raw heading Slider is gone. You turn by DRAGGING the world -
+// the treeline pans with you and the tape follows, which is what a compass is for.
+// Empty ground only: a drag that starts on a panel belongs to that panel.
+let turning = null;
+const offTurnDown = engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 0 || e.target) return;
+  turning = { id: e.pointerId, x: e.x, h: heading };
+});
+const offTurnMove = engine.bus.on('pointermove', (e) => {
+  if (!turning || e.pointerId !== turning.id) return;
+  setHeading(turning.h - (e.x - turning.x) * 0.35);
+});
+const endTurn = (e) => { if (turning && e.pointerId === turning.id) turning = null; };
+const offTurnUp = engine.bus.on('pointerup', endTurn);
+const offTurnCancel = engine.bus.on('pointercancel', endTurn);
+window.addEventListener('pagehide', () => {
+  offTurnDown?.(); offTurnMove?.(); offTurnUp?.(); offTurnCancel?.();
+}, { once: true });
+function setHeading(h) {
+  heading = ((h % 360) + 360) % 360;
+  compass.setHeading(heading, { animate: false });
+  repaintIfChanged();
+}
+
+// the day/clock dial ('s cut line graduated). It is no longer a static
+// prop: dayT walks on the ticker, the dial reads it, and the camp re-lights from the
+// same number. A game would drive setTime from its clock; so does this page now.
+const dayDial = new DayDial({ size: 46, time: dayT });
+engine.layers.background.add(dayDial);
+
+// ---- satchel, hotbar, chest: the quick-transfer protocol ----
+const satchel = new ItemGrid({ cols: 4, rows: 2 });
+satchel.setItem(0, 'pelt', 7);
+satchel.setItem(1, 'fish', 3);
+satchel.setItem(2, 'wood', 12);
+satchel.setItem(3, 'cloak', 1, { durability: 0.55 });
+const hotbar = new ItemGrid({ cols: 6, rows: 1 });
+hotbar.setItem(0, 'fish', 2);
+engine.layers.background.add(satchel, hotbar);
+
+let counts = { pelt: 7, fish: 5, wood: 12, cloak: 1, cooked_fish: 0 };
+function recount() {
+  counts = {};
+  for (const g of [satchel, hotbar, chest]) {
+    for (let i = 0; i < g.slots.length; i++) {
+      const it = g.getItem(i);
+      if (it) counts[it.item] = (counts[it.item] ?? 0) + it.count;
+    }
+  }
+  browser.refresh();
+}
+
+const chestWin = EldWindow.create({
+  title: 'The Frozen Chest', x: 445, y: 90,
+  content: (c) => {
+    const chestGrid = new ItemGrid({ cols: 4, rows: 2 });
+    chestGrid.setItem(0, 'wood', 18);
+    chestGrid.setItem(1, 'pelt', 9);
+    window.chest = chestGrid; // page-scope: recount + the buttons read it
+    chestGrid.linkTransfer(satchel);
+    satchel.linkTransfer(chestGrid);
+    const takeAll = new Button('Take All', { minWidth: 100, height: 26, onClick: () => { chestGrid.transferAll(satchel); recount(); } });
+    const depositAll = new Button('Deposit All', { minWidth: 110, height: 26, onClick: () => { satchel.transferAll(chestGrid); recount(); } });
+    // the graduation: merge-first consolidation, rarity-then-id order
+    const sortBtn = new Button('Sort', { minWidth: 66, height: 26, onClick: () => { chestGrid.sort({ silent: false }); recount(); } });
+    const row = new HBox({ gap: 8 });
+    row.add(takeAll, depositAll, sortBtn);
+    // minW carries the header plaque (the / lesson: the title and controls
+ // are not part of the content measurement — center-plaqued windows need the
+ // title width plus roughly twice the controls cluster)
+    const root = new VBox({ padding: { t: 8, r: 8, b: 0, l: 8 }, gap: 10, minW: 320 }); // roots claim ink (law)
+    root.add(chestGrid, row);
+    c.add(root);
+  },
+});
+const chest = window.chest;
+// glued left of the recipe panel until the user takes it (the idiom — a fixed
+// x overlapped the browser at 1024×640, and engine dims lie at module-eval time)
+satchel.on('transfer', recount);
+chest.on('transfer', recount);
+
+// ---- the input replay's handle bag (the seventh instrument): handles, never coordinates ----
+// ---- the ground circle: right-click on the snowfield opens the camp
+// wheel; grids, the browser, and the campfire keep their own presses. The Face
+// ring turns the SAME heading the world-turn drag turns; Craft presses the
+// browser's own craft door for whatever recipe stands selected.
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'face', label: 'Face', children: [
+ { id: 'north', label: 'North' },
+ { id: 'east', label: 'East' },
+ { id: 'south', label: 'South' },
+ { id: 'west', label: 'West' },
+ ] },
+ { id: 'craft', label: 'Craft' },
+ ],
+});
+const FACE_DEG = { north: 0, east: 90, south: 180, west: 270 };
+ground.on('select', ({ id, path }) => {
+  if (path[0] === 'face') setHeading(FACE_DEG[id]);
+  else if (id === 'craft') browser.craftBtn.dispatch('click', {});
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+
+window.__survival = {
+  ground: () => ground,
+  heading: () => heading,
+  compassText: () => compass.readout._text,
+  chestWin: () => chestWin,
+  header: () => chestWin.header,
+  sslot: (i) => satchel.slots[i],
+  cslot: (i) => chest.slots[i],
+  sitem: (i) => satchel.getItem(i),
+  citem: (i) => chest.getItem(i),
+  craftBtn: () => browser.craftBtn,
+  counts: () => counts,
+};
+
+// ---- the campfire: a ProcessPanel the page clocks ----
+// Both this and the recipe browser were UNTITLED — an In/Fuel/Out column and a tabbed
+// list, floating unnamed. STYLE 1a.1: say what a panel is.
+const fireLabel = new TextNode('Campfire — drag fish and timber in', { size: 11, color: COLORS.textMuted, shadow });
+const browserLabel = new TextNode('Crafting', {
+  font: FONTS.header, size: 12, smallCaps: true, letterSpacing: 1, color: COLORS.accent, shadow,
+});
+engine.layers.background.add(fireLabel, browserLabel);
+const fire = new ProcessPanel();
+fire.input.setItem(0, 'fish', 2);
+fire.fuel.setItem(0, 'wood', 4);
+engine.layers.background.add(fire);
+let burn = 0;
+const cookTick = (dt) => {
+  const raw = fire.input.getItem(0);
+  const fuel = fire.fuel.getItem(0);
+  if (!raw || raw.item !== 'fish' || !fuel || fuel.item !== 'wood') { burn = 0; fire.setProgress(0); return; }
+  burn += dt * 0.3;
+  if (burn >= 1) {
+    burn = 0;
+    const out = fire.output.getItem(0);
+    if (raw.count > 1) fire.input.setItem(0, 'fish', raw.count - 1); else fire.input.clearSlot(0);
+    if (fuel.count > 1) fire.fuel.setItem(0, 'wood', fuel.count - 1); else fire.fuel.clearSlot(0);
+    fire.output.setItem(0, 'cooked_fish', (out?.count ?? 0) + 1);
+    EldNotify.send({ channel: 'toast', title: 'Something smells almost edible.' });
+    recount();
+  }
+  fire.setProgress(burn);
+};
+// the campfire boots cold under FROZEN/ASSERT (the ambient-ticker rule): a cook
+// every ~3.3s holds neither a bit-stable baseline nor settled assert reads — the
+// suite clocks one cook by hand through the same function
+engine.ticker.add((dt) => { if (!INSTRUMENTED) cookTick(dt); });
+
+// ---- the long winter itself: the day turns, and the cold reads the clock ----
+// A survival HUD whose meters never move is a screenshot. Warmth drains, and it
+// drains FASTER after dark - which is what the day dial is telling you.
+const body = { warmth: 62, hunger: 41, thirst: 78 };
+const [warmthChip, hungerChip, thirstChip] = meters.chips;
+let bodyAcc = 0;
+engine.ticker.add((dt) => {
+  if (INSTRUMENTED) return;
+  dayT = (dayT + dt / 180) % 1;          // a three-minute day
+  dayDial.setTime(dayT, { silent: true });
+  repaintIfChanged();
+  bodyAcc += dt;
+  if (bodyAcc < 1) return;
+  bodyAcc = 0;
+  const night = Math.abs(dayT - 0.5) > 0.28;
+  const nearFire = fire.output.getItem(0) != null || fire.fuel.getItem(0) != null;
+  body.warmth = Math.max(0, Math.min(100, body.warmth + (nearFire ? 1.2 : 0) - (night ? 1.6 : 0.6)));
+  body.hunger = Math.max(0, body.hunger - 0.35);
+  body.thirst = Math.max(0, body.thirst - 0.25);
+  warmthChip.setValue(Math.round(body.warmth));
+  hungerChip.setValue(Math.round(body.hunger));
+  thirstChip.setValue(Math.round(body.thirst));
+});
+
+// ---- the recipe browser: the page owns the ledger ----
+const browser = new RecipeBrowser({
+  recipes: [
+    { id: 'cloak', label: 'Pelt Cloak', icon: 'shield', out: { id: 'cloak' }, needs: [{ id: 'pelt', count: 5 }], category: 'garb' },
+    { id: 'bundle', label: 'Timber Bundle', icon: 'book', out: { id: 'wood', count: 4 }, needs: [{ id: 'wood', count: 3 }], category: 'camp' },
+    { id: 'smoker', label: 'Fish Smoker', icon: 'fireball', out: { id: 'smoker' }, needs: [{ id: 'wood', count: 8 }, { id: 'fish', count: 2 }], category: 'camp' },
+  ],
+  have: (id) => counts[id] ?? 0,
+  onCraft: (v, e) => {
+    // the data-driven protocol: the PAGE spends from the satchel, then refreshes
+    for (const nd of e.needs) {
+      let left = nd.count;
+      for (const g of [satchel, hotbar, chest]) {
+        for (let i = 0; i < g.slots.length && left > 0; i++) {
+          const it = g.getItem(i);
+          if (!it || it.item !== nd.id) continue;
+          const take = Math.min(left, it.count);
+          if (it.count - take > 0) g.setItem(i, nd.id, it.count - take); else g.clearSlot(i);
+          left -= take;
+        }
+      }
+    }
+    const empty = satchel.firstEmpty();
+    if (empty) satchel.setItem(empty.index, e.out.id, e.out.count);
+    EldNotify.send({ channel: 'toast', title: 'Crafted', message: `${e.out.count} × ${e.out.id}` });
+    recount();
+  },
+  width: 470, height: 300,
+});
+engine.layers.background.add(browser);
+recount();
+
+const hud = new UINode({ name: 'winter-chrome' });
+engine.layers.background.add(hud);
+hud.onLayout = function () {
+  const W = engine.width, H = engine.height;
+  compass.setPos(Math.round((W - compass.w) / 2), 10);
+  turnHint.setPos(Math.round((W - turnHint.w) / 2), 10 + compass.h + 4);
+  dayDial.setPos(Math.round((W - compass.w) / 2) - dayDial.w - 14, 8); // rides the compass's left shoulder
+  hotbar.setPos(Math.round((W - hotbar.w) / 2), H - hotbar.h - 60);
+  satchel.setPos(16, H - satchel.h - 60);
+  fire.setPos(W - fire.w - 16, H - fire.h - 60);
+  browser.setPos(W - browser.w - 16, 90);
+  browserLabel.setPos(browser.x, 90 - browserLabel.h - 4);
+  fireLabel.setPos(fire.x, fire.y - fireLabel.h - 4);
+  if (!chestWin.userPlaced) chestWin.setPos(Math.max(16, browser.x - chestWin.w - 16), 90); // the widget's claim flag
+};
+
+// ---- ?assert=1: the in-page kit suite ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    await wait(1200);
+    ok('the larder counts', (counts.wood ?? 0) >= 30);
+    // BOTH arms of the test suite: affordable-enabled alone is also the state
+    // of a deleted gate — the ×99 ask must SEAL the button, and restoring the
+    // count must open it again (the settings two-arm idiom)
+    ok('the browser gates by the ledger', browser.craftBtn.disabled === false);
+    const qty0 = browser.qty.value;
+    browser.qty.setValue(99, { silent: false }); // LOUD: the test suite repaints on change
+    await wait(80);
+    ok('a hopeless count SEALS the craft (the test suite has teeth)', browser.craftBtn.disabled === true);
+    browser.qty.setValue(qty0, { silent: false });
+    await wait(80);
+    ok('an honest count opens it again', browser.craftBtn.disabled === false);
+    compass.setHeading(359.6);
+    ok('the compass wraps clean', compass.readout._text === '0°');
+
+    // the REAL turn: the drag handler lives on the bus, so the suite drives the
+    // same plane a pointer does — the widget setter above never touches the page's
+    // heading, never repaints the snow. The property is AGREEMENT: the heading
+    // moves, the painted parallax follows it, and the tape reads the same number.
+    const h0 = heading, pan0 = paintedPan;
+    engine.bus.emit('pointerdown', { x: 620, y: 400, button: 0, pointerId: 7, target: null });
+    engine.bus.emit('pointermove', { x: 420, y: 400, pointerId: 7 });
+    engine.bus.emit('pointerup', { x: 420, y: 400, button: 0, pointerId: 7 });
+    ok('dragging the snow turns the world: heading, parallax paint and tape agree',
+      heading !== h0 && paintedPan !== pan0 && paintedPan === Math.round(heading)
+      && compass.readout._text === `${Math.round(heading) % 360}°`);
+
+    // the ground circle: a right-click on the snowfield opens the camp
+    // wheel (button 2 partitions cleanly beside the button-0 world-turn), and
+    // the nested Face>East pick turns the SAME heading the drag turns
+    engine.bus.emit('pointerdown', { x: 620, y: 420, button: 2, pointerId: 8, target: null, native: null });
+    await wait(60);
+    ok('ground: a right-click on the snowfield opens the camp wheel',
+      window.__survival.ground().isOpen === true);
+    window.__survival.ground()._setIndex(0, false); // Face
+    window.__survival.ground().onActivate();
+    await wait(40);
+    window.__survival.ground()._setIndex(1, false); // East
+    window.__survival.ground().onActivate();
+    await wait(60);
+    ok('ground: the nested Face>East pick turns the world to 90',
+      window.__survival.ground().isOpen === false && heading === 90
+      && compass.readout._text === '90°');
+
+    // STYLE 1a.1: the three meters carry their names ON SCREEN
+    ok('the body meters wear their names ON SCREEN',
+      // visibleInTree + in-frame, not parentage: parent != null was true
+      // from the first frame and could not catch a label pushed off-frame
+      METER_LABELS.length === 3
+      && METER_LABELS.every((n) => n.visibleInTree() === true
+        && n.worldX >= 0 && n.worldX + n.w <= engine.width
+        && n.worldY >= 0 && n.worldY + n.h <= engine.height)
+      && METER_LABELS.map((n) => n._text).join('|') === 'Warmth|Hunger|Thirst');
+
+    // take-all, SEEDED so the relation is exact: the swept counts arrive whole in
+    // the satchel and the chest empties — ">= before" was true even when nothing moved
+    chest.setItem(0, 'wood', 18);
+    chest.setItem(1, 'pelt', 9);
+    const tally = (g, id) => g.slots.reduce((t, _s, i) => {
+      const it = g.getItem(i);
+      return t + (it && it.item === id ? it.count : 0);
+    }, 0);
+    const sw0 = tally(satchel, 'wood'), sp0 = tally(satchel, 'pelt');
+    chest.transferAll(satchel);
+    ok('take-all sweeps the whole chest into the satchel and empties it',
+      tally(satchel, 'wood') === sw0 + 18 && tally(satchel, 'pelt') === sp0 + 9
+      && tally(chest, 'wood') === 0 && tally(chest, 'pelt') === 0);
+    const rawIn = fire.input.getItem(0), fuelIn = fire.fuel.getItem(0);
+    ok('the campfire holds its seeded slots: fish in, timber under, nothing out yet',
+      rawIn?.item === 'fish' && rawIn.count === 2
+      && fuelIn?.item === 'wood' && fuelIn.count === 4
+      && fire.output.getItem(0) === null);
+
+    // the design requirement's proof: the chip anatomy — a full-height, edge-justified,
+    // bordered plate; the icon rides INSIDE it; the value clears it
+    const chip = meters.chips[0];
+    ok('the meters wear the chip plate',
+      // the icon arms state the PROPERTY (inside the plate; the value
+      // clears it), not the widget's chosen 3px pad
+      chip.plate.x === 0 && chip.plate.w === chip.h && chip.plate.h === chip.h
+      && chip.icon.x > 0 && chip.icon.x + chip.icon.w <= chip.plate.x + chip.plate.w
+      && chip.valueText.x >= chip.plate.x + chip.plate.w + 2);
+
+    // the quick-transfer protocol conserves every stick of wood
+    const woodTotal = () => [satchel, hotbar, chest].reduce((s, g) =>
+      s + g.slots.reduce((t, sl, i) => {
+        const it = g.getItem(i);
+        return t + (it && it.item === 'wood' ? it.count : 0);
+      }, 0), 0);
+    chest.setItem(0, 'wood', 6);
+    recount();
+    const w0 = woodTotal();
+    const moved = chest._quickMove(chest.slots[0]);
+    await wait(60);
+    ok('shift-click quick-transfer conserves the wood', moved === true && woodTotal() === w0);
+
+    await wait(200);
+    const cts = runAudit(engine).counts;
+    ok('the page audits clean on every rule',
+      Object.values(cts).reduce((a, b) => a + b, 0) === 0);
+
+    // last: the cook toast is a live overlay — it must not sit under the audit
+    cookTick(4); // one full burn on the page's own clock
+    await wait(120);
+    const out = fire.output.getItem(0);
+    ok('the campfire cooks on the page clock',
+      out !== null && out.item === 'cooked_fish' && out.count >= 1 && EldToast.live.length >= 1);
+
+    ok('no errors reached the console during the run', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `SURVIVALHUD ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+} else {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'SURVIVALHUD READY';
+  }, 1000);
+}
+</script>
+</body>
+</html>

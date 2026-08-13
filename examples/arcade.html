@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Arcade</title>
+<!-- @demo   A real match-three: swaps that only commit when they match, matches that slide and lock before they clear, cascades that multiply, seeded refills, a hint that proves its move — against a moves budget and a running clock, ending in the counting-number tally with its rank seal.
+     @shows  ScoreTally, LevelSelectGrid, StarRating, BigTimer, attachBadge, FloatText, RadialMenu, Button, TextNode, UINode, QuadNode, NineSliceNode
+     @params ?freeze=1 — bit-stable snapshot boot (board parked, tally hidden) · ?assert=1 — the in-page suite titles its own PASS count -->
+
+<!-- the proof page, rebuilt as a playable loop: click two ADJACENT
+     tide-stones to swap — a swap that makes no run of three BOUNCES back and
+     spends nothing; a match clears, scores 10 × stones × cascade, refills from
+     the seeded bag (columns visibly fall on render offsets), and cascades
+     multiply. The hint computes a PROVEN legal move; the finish paths (button,
+     moves spent, clock timeout) all derive the tally from play — score, moves
+     kept, tide bonus — and the reveal re-appends the tally so it paints OVER
+     the level rail (the reveal-without-raise class died here). Every color and
+     refill draws from one seeded bag: frozen shots and the suite are bit-stable. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {
+  Eldritch, ScoreTally, LevelSelectGrid, StarRating, BigTimer,
+  attachBadge, FloatText, RadialMenu, Button, TextNode, UINode, QuadNode, NineSliceNode,
+  COLORS, FONTS, hitTest,
+} from '../src/lovecraft-ui.js';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+// the census boots (audit/torture/resize) must see a RESTING board — gate the
+// juice at the source, not behind a dead window
+const INSTRUMENTED = FROZEN || ASSERT
+  || params.has('audit') || params.has('torture') || params.has('resize');
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+
+// ---- the icon pack (optional download): the RE-SKIN idiom ----
+// `as:` points at icon ids this page ALREADY uses, so the registry re-bakes those NAMES
+// in place: every live quad follows with no page code and no atlas movement.
+// `fallback: 'none'` leaves the procedural art standing when assets/ is absent, which is
+// the shipped default - the pack is an optional download and the page must not need it.
+// Skipped under FROZEN: --screenshot captures at the load event and cannot wait for an
+// async decode, so frozen baselines run on the procedural art by necessity.
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-3649', as: 'book' },
+      { id: 'ico-0210', as: 'shield' },
+      { id: 'ico-0513', as: 'sword' },
+      { id: 'ico-0489', as: 'blindinglight' },
+      { id: 'ico-0707', as: 'arrows' },
+      { id: 'ico-0307', as: 'leafs' },
+      { id: 'ico-0394', as: 'deathkiss' },
+      { id: 'ico-0017', as: 'fireball' },
+      { id: 'ico-0078', as: 'fireball2' },
+    ],
+  });
+}
+
+window.engine = engine;
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+
+// Page placement must CHAIN a widget's own onLayout, never clobber it.
+const place = (node, fn) => {
+  const own = node.onLayout?.bind(node);
+  node.onLayout = function () { own?.(); fn.call(this); };
+};
+function seededRng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+// ---- the match board: a REAL match-three on one seeded bag ----
+// The stones are 36 POOLED quads at fixed cell positions; the MODEL is
+// `cells[r][c]` (a color index). Swaps, clears, gravity, and refills recolor the
+// pool — combat never allocates. Motion is render-only fx (offsets/scale/opacity),
+// so the model commits synchronously and the suite reads final state directly.
+const GEMS = [COLORS.accent, COLORS.quest, COLORS.negative, COLORS.bone];
+const SIZE = 6, CELL = 52;
+const board = new UINode({ name: 'tide-board', interactive: true });
+const boardBg = new NineSliceNode(engine.textures.frame('panel.dark'));
+board.add(boardBg);
+boardBg.setRect(0, 0, SIZE * CELL + 20, SIZE * CELL + 20);
+board.setSize(SIZE * CELL + 20, SIZE * CELL + 20);
+
+// ---- the tide-stones: four carved SHAPES, not four flat fills ----
+// STYLE section 1 puts "a flat colored rectangle" first on the replace-this list, and
+// a match-three board built out of them was the worst instance of it in the showcase.
+// Each kind is ONE page-owned raster drawn in WHITE, so MeshBasicMaterial's map x
+// color gives it its tint from a single upload (zero atlas entries, the ArcGauge
+// own-raster precedent). The SHAPE carries the read, so the board is playable without
+// relying on hue alone.
+const STONE_PX = CELL - 8;
+function tideStoneTexture(kind) {
+  const cv = document.createElement('canvas');
+  const s = Math.max(1, Math.round(window.devicePixelRatio || 1));
+  cv.width = STONE_PX * s; cv.height = STONE_PX * s;
+  const g = cv.getContext('2d');
+  g.scale(s, s);
+  const M = STONE_PX / 2;
+  g.translate(M, M);
+  g.fillStyle = '#ffffff';
+  g.strokeStyle = '#ffffff';
+  g.lineJoin = 'round';
+  g.lineCap = 'round';
+  if (kind === 0) {                       // a pearl, lit from the north-west
+    g.beginPath(); g.arc(0, 0, M * 0.62, 0, Math.PI * 2); g.fill();
+    g.fillStyle = 'rgba(0,0,0,0.38)';
+    g.beginPath(); g.arc(M * 0.16, M * 0.18, M * 0.5, 0, Math.PI * 2); g.fill();
+  } else if (kind === 1) {                // a spiral shell
+    g.lineWidth = 3;
+    g.beginPath();
+    for (let a = 0; a < Math.PI * 4.6; a += 0.16) {
+      const rr = M * 0.10 + a * M * 0.046;
+      const px = Math.cos(a) * rr, py = Math.sin(a) * rr;
+      if (a === 0) g.moveTo(px, py); else g.lineTo(px, py);
+    }
+    g.stroke();
+  } else if (kind === 2) {                // an urchin
+    g.lineWidth = 2.4;
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      g.beginPath();
+      g.moveTo(Math.cos(a) * M * 0.22, Math.sin(a) * M * 0.22);
+      g.lineTo(Math.cos(a) * M * 0.76, Math.sin(a) * M * 0.76);
+      g.stroke();
+    }
+    g.beginPath(); g.arc(0, 0, M * 0.26, 0, Math.PI * 2); g.fill();
+  } else {                                // a scallop, ribbed from the hinge
+    g.beginPath();
+    g.moveTo(0, M * 0.5);
+    for (let i = 0; i <= 8; i++) {
+      const a = Math.PI + (i / 8) * Math.PI;
+      g.lineTo(Math.cos(a) * M * 0.68, M * 0.5 + Math.sin(a) * M * 0.74);
+    }
+    g.closePath(); g.fill();
+    g.strokeStyle = 'rgba(0,0,0,0.42)';
+    g.lineWidth = 1.6;
+    for (let i = 1; i < 5; i++) {
+      const a = Math.PI + (i / 5) * Math.PI;
+      g.beginPath();
+      g.moveTo(0, M * 0.48);
+      g.lineTo(Math.cos(a) * M * 0.56, M * 0.48 + Math.sin(a) * M * 0.62);
+      g.stroke();
+    }
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.minFilter = THREE.LinearFilter;
+  t.magFilter = THREE.LinearFilter;
+  t.generateMipmaps = false;
+  return t;
+}
+const STONE_TEX = [0, 1, 2, 3].map(tideStoneTexture);
+
+// the board face: 36 carved wells on one page-owned raster, so the stones sit IN a
+// tide pool instead of floating on a flat panel
+const wellsCanvas = document.createElement('canvas');
+const wellsTex = new THREE.CanvasTexture(wellsCanvas);
+wellsTex.colorSpace = THREE.SRGBColorSpace;
+wellsTex.minFilter = THREE.LinearFilter;
+wellsTex.magFilter = THREE.LinearFilter;
+wellsTex.generateMipmaps = false;
+(function paintWells() {
+  const px = Math.max(1, Math.round(window.devicePixelRatio || 1));
+  const side = SIZE * CELL;
+  wellsCanvas.width = side * px; wellsCanvas.height = side * px;
+  const g = wellsCanvas.getContext('2d');
+  g.scale(px, px);
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      const x = c * CELL + CELL / 2, y = r * CELL + CELL / 2, rad = CELL * 0.42;
+      const bowl = g.createRadialGradient(x, y - rad * 0.3, rad * 0.2, x, y, rad);
+      bowl.addColorStop(0, 'rgba(4,8,10,0.85)');
+      bowl.addColorStop(1, 'rgba(30,38,33,0.55)');
+      g.fillStyle = bowl;
+      g.beginPath(); g.arc(x, y, rad, 0, Math.PI * 2); g.fill();
+      g.strokeStyle = 'rgba(92,103,94,0.30)';   // the lit north lip of the well
+      g.lineWidth = 1.5;
+      g.beginPath(); g.arc(x, y, rad, Math.PI * 1.08, Math.PI * 1.92); g.stroke();
+    }
+  }
+  wellsTex.needsUpdate = true;
+})();
+
+// The wells sit between the panel and the stones - insertion order IS paint order,
+// and the stone loop runs further down, so mounting here puts them underneath. Both
+// this and the panel are art leaves, so neither joins the overlap census
+// (audit.js isArtLeaf) and the board keeps its ALLOW cap of 8.
+const wellsQuad = new QuadNode({ texture: wellsTex });
+board.add(wellsQuad);
+wellsQuad.setRect(10, 10, SIZE * CELL, SIZE * CELL);
+board.on('dispose', () => { wellsTex.dispose(); for (const t of STONE_TEX) t.dispose(); });
+
+let bag = seededRng(0x3141); // ONE bag feeds fills and refills — bit-stable boots
+let cells = [];
+const stones = [];
+let picked = null;
+let moves = 12;
+let score = 0;
+const state = { won: false, waves: [], lastHint: null };
+
+// no ready-made run at placement (re-roll), and the finished board must hold a move
+function rollColor(g, r, c) {
+  let ci;
+  do { ci = Math.floor(bag() * GEMS.length); }
+  while ((c >= 2 && g[r][c - 1] === ci && g[r][c - 2] === ci)
+      || (r >= 2 && g[r - 1][c] === ci && g[r - 2][c] === ci));
+  return ci;
+}
+function freshGrid() {
+  let g;
+  do {
+    g = Array.from({ length: SIZE }, () => Array(SIZE).fill(-1));
+    for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) g[r][c] = rollColor(g, r, c);
+  } while (!findLegalMove(g));
+  return g;
+}
+// every horizontal/vertical run of three-or-more, as a set of 'r,c' keys
+function findRuns(g) {
+  const out = new Set();
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE - 2; c++) {
+      const v = g[r][c];
+      if (v < 0 || g[r][c + 1] !== v || g[r][c + 2] !== v) continue;
+      let e = c + 2;
+      while (e + 1 < SIZE && g[r][e + 1] === v) e++;
+      for (let k = c; k <= e; k++) out.add(`${r},${k}`);
+      c = e;
+    }
+  }
+  for (let c = 0; c < SIZE; c++) {
+    for (let r = 0; r < SIZE - 2; r++) {
+      const v = g[r][c];
+      if (v < 0 || g[r + 1][c] !== v || g[r + 2][c] !== v) continue;
+      let e = r + 2;
+      while (e + 1 < SIZE && g[e + 1][c] === v) e++;
+      for (let k = r; k <= e; k++) out.add(`${k},${c}`);
+      r = e;
+    }
+  }
+  return out;
+}
+// the first adjacent swap that would match — the hint's proof and the deadlock guard
+function findLegalMove(g) {
+  for (let r = 0; r < SIZE; r++) {
+    for (let c = 0; c < SIZE; c++) {
+      for (const [dr, dc] of [[0, 1], [1, 0]]) {
+        const r2 = r + dr, c2 = c + dc;
+        if (r2 >= SIZE || c2 >= SIZE) continue;
+        [g[r][c], g[r2][c2]] = [g[r2][c2], g[r][c]];
+        const hit = findRuns(g).size > 0;
+        [g[r][c], g[r2][c2]] = [g[r2][c2], g[r][c]];
+        if (hit) return { a: [r, c], b: [r2, c2] };
+      }
+    }
+  }
+  return null;
+}
+function stoneAt(r, c) { return stones[r * SIZE + c] ?? null; }
+function paintCell(r, c) {
+  const s = stoneAt(r, c);
+  if (!s) return;
+  const ci = cells[r][c];
+  // a cleared cell is transient (collapse refills it in the same beat) - drop the
+  // art rather than leaving a tinted shape sitting in an empty well
+  s.setTexture(ci >= 0 ? STONE_TEX[ci] : null);
+  s.setColor(GEMS[ci] ?? 0x000000);
+}
+function paintBoard() { for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) paintCell(r, c); }
+function adjacent(a, b) { return Math.abs(a._r - b._r) + Math.abs(a._c - b._c) === 1; }
+
+// a refused swap leans toward the trade and returns — render offsets only
+function bounce(a, b) {
+  if (INSTRUMENTED) return;
+  const dx = (b._c - a._c) * 16, dy = (b._r - a._r) * 16;
+  for (const [s, sx, sy] of [[a, dx, dy], [b, -dx, -dy]]) {
+    s.fxOffsetX = sx; s.fxOffsetY = sy;
+    engine.ticker.tween(s, { fxOffsetX: 0, fxOffsetY: 0 }, { dur: 0.14 });
+  }
+}
+
+const cloneGrid = (g) => g.map((row) => row.slice());
+// one-shot ticker delay (the page owns no timers; the ticker is the clock)
+function after(sec, fn) {
+  let t = 0;
+  const off = engine.ticker.add((dt) => { t += dt; if (t >= sec) { off(); fn(); } });
+  return off;
+}
+
+// gravity, MODEL ONLY: each column compacts down and the bag refills the top. Returns
+// the fall records [r, c, distance] so the film can drop the survivors in later.
+function collapseModel() {
+  const drops = [];
+  for (let c = 0; c < SIZE; c++) {
+    let write = SIZE - 1;
+    for (let r = SIZE - 1; r >= 0; r--) {
+      if (cells[r][c] < 0) continue;
+      if (write !== r) { cells[write][c] = cells[r][c]; drops.push([write, c, write - r]); }
+      write--;
+    }
+    const holes = write + 1;
+    for (let r = write; r >= 0; r--) {
+      cells[r][c] = Math.floor(bag() * GEMS.length);
+      drops.push([r, c, holes]);
+    }
+  }
+  return drops;
+}
+
+// ---- THE RESOLVE, AS A FILM ----------------------------------------------------
+// The MODEL settles synchronously - the suite reads moves/score/cells the instant
+// trySwap returns, and must keep doing so - while the VISUALS are recorded as frames
+// and played back on the ticker.
+//
+// The defect this guards: the animation showing icons sliding and locking
+// together before a row scores was lost, and the row just vanished instantly. The old code mutated the grid and ran the WHOLE cascade inside one
+// synchronous while-loop, so every wave landed in a single frame: a successful swap
+// never slid, and the matched run blinked out with no beat between clear and refill.
+// The only surviving animation was `bounce`, which plays on a REFUSED swap - the one
+// case where nothing happens.
+let filmRunning = false;
+// the projector switch: INSTRUMENTED keeps every census/frozen boot parked, but the
+// same gate made the film the one path no instrument walked (item 2 — the gap
+// "the row just disappears instantly" lived in, unread by 22 green
+// asserts). filmForced opens ONLY the film (the slide + the reel) while it is up;
+// nothing on the page sets it — the ?assert suite does, briefly, and turns it off.
+let filmForced = false;
+
+function renderGrid(g) { const keep = cells; cells = g; paintBoard(); cells = keep; }
+
+function playFilm(film, delay = 0) {
+  if ((INSTRUMENTED && !filmForced) || !film.length) { paintBoard(); return; } // censuses read the final board
+  filmRunning = true; // set BEFORE the delay: the slide is part of the resolve, and a
+                      // second swap landing mid-slide would tear the film
+  let i = 0;
+  const nextWave = () => {
+    if (i >= film.length) { filmRunning = false; paintBoard(); return; }
+    const f = film[i++];
+    renderGrid(f.before);                      // the board as it stood when the run closed
+    for (const [r, c] of f.cleared) {
+      const s = stoneAt(r, c);
+      if (!s) continue;
+      s.fxOffsetX = 0; s.fxOffsetY = 0; s.fxScale = 1; s.fxOpacity = 1;
+      // lock together, THEN leave - the two halves the old flash collapsed into one.
+      // The leave CHAINS through onDone, not a delay: the ticker is last-wins per
+      // (target, prop), so a delayed second fxScale tween preempts the lock at
+      // registration and the grow never renders (the suite's mid-clear sample,
+      // fxScale > 1 while visible, is what holds this beat honest).
+      engine.ticker.tween(s, { fxScale: 1.28 }, {
+        dur: 0.11,
+        onDone: () => engine.ticker.tween(s, { fxScale: 0.15, fxOpacity: 0 }, { dur: 0.15 }),
+      });
+    }
+    floats.spawn(`+${f.gained}`, f.fx, f.fy, { crit: f.cascade > 1 });
+    after(0.28, () => {
+      renderGrid(f.after);                     // survivors and refill in their final cells
+      for (const [r, c, d] of f.drops) {
+        const s = stoneAt(r, c);
+        if (!s) continue;
+        s.fxScale = 1; s.fxOpacity = 1;
+        s.fxOffsetY = -d * CELL;               // ...falling in from above
+        engine.ticker.tween(s, { fxOffsetY: 0 }, { dur: 0.22 });
+      }
+      after(0.24, nextWave);                   // a beat between waves, so a cascade READS
+    });
+  };
+  // the swap's slide has to land before the first clear paints over it
+  if (delay > 0) after(delay, nextWave); else nextWave();
+}
+
+// the page-local handles the suite needs (the window.__deck / window.__shooter kin):
+// forceFilm is the projector switch above, filmRunning lets the suite wait the reel
+// out, stoneAt spares it re-deriving the pool index math
+window.__arcade = { lastWheel: null, groundOpen: () => ground.isOpen,
+  forceFilm: (v) => { filmForced = !!v; }, filmRunning: () => filmRunning, stoneAt,
+  // the input replay's handles: the score it must see rise, and the page's own
+  // solver so the input replay clicks a REAL matching pair instead of baking coordinates
+  score: () => score, findMove: () => findLegalMove(cloneGrid(cells)),
+  ground: () => ground };
+
+// ---- the ground circle: right-click beside the board opens the wheel;
+// stones and rails keep their own presses. Hint spends the SAME satchel the
+// button spends; a Pool pick rides the level grid's own select glue.
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'hint', label: 'Hint' },
+ { id: 'pools', label: 'Pools', children: [
+ { id: 1, label: 'Pool 1' },
+ { id: 2, label: 'Pool 2' },
+ { id: 3, label: 'Pool 3' },
+ ] },
+ ],
+});
+ground.on('select', ({ id, path }) => {
+  window.__arcade.lastWheel = id; // the input replay reads which sector a REAL pointer landed
+  if (id === 'hint') showHint();
+  else if (path[0] === 'pools') grid.dispatch('select', { id });
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+
+// clears score 10 × stones × cascade; waves record the law for the suite
+function resolveCascades(runs, { delay = 0 } = {}) {
+  const film = [];
+  let cascade = 1;
+  while (runs.size) {
+    const gained = runs.size * 10 * cascade;
+    state.waves.push({ cleared: runs.size, mult: cascade, gained });
+    score += gained;
+    scoreText.setText(`Score: ${score}`);
+    const before = cloneGrid(cells);
+    const cleared = [];
+    let fx = 0, fy = 0;
+    for (const key of runs) {
+      const [r, c] = key.split(',').map(Number);
+      fx += board.x + 10 + c * CELL + CELL / 2;
+      fy += board.y + 10 + r * CELL + CELL / 2;
+      cleared.push([r, c]);
+      cells[r][c] = -1;
+    }
+    const drops = collapseModel();
+    film.push({ before, cleared, drops, gained, cascade,
+                fx: fx / cleared.length, fy: fy / cleared.length, after: cloneGrid(cells) });
+    runs = findRuns(cells);
+    cascade++;
+  }
+  playFilm(film, delay);
+  if (moves === 0 && !state.won) winNow(); // the budget's own ending
+}
+
+// only neighbors trade places, and only a MATCH commits — a miss bounces free
+function trySwap(a, b) {
+  if (!a || !b || a === b) return false;
+  if (!adjacent(a, b)) return false;
+  if (moves <= 0 || state.won) return false;
+  const ar = a._r, ac = a._c, br = b._r, bc = b._c;
+  [cells[ar][ac], cells[br][bc]] = [cells[br][bc], cells[ar][ac]];
+  const runs = findRuns(cells);
+  if (!runs.size) {
+    [cells[ar][ac], cells[br][bc]] = [cells[br][bc], cells[ar][ac]]; // no match: revert
+    bounce(a, b);
+    return false;
+  }
+  paintCell(ar, ac); paintCell(br, bc);
+  moves = Math.max(0, moves - 1);
+  movesText.setText(`Moves: ${moves}`);
+  // The pair SLIDES into place before anything clears: each stone now shows what came
+  // from the other cell, so it starts at that cell's offset and travels home.
+  if (!INSTRUMENTED || filmForced) {
+    const dx = (bc - ac) * CELL, dy = (br - ar) * CELL;
+    a.fxOffsetX = dx; a.fxOffsetY = dy;
+    b.fxOffsetX = -dx; b.fxOffsetY = -dy;
+    engine.ticker.tween(a, { fxOffsetX: 0, fxOffsetY: 0 }, { dur: 0.16 });
+    engine.ticker.tween(b, { fxOffsetX: 0, fxOffsetY: 0 }, { dur: 0.16 });
+  }
+  resolveCascades(runs, { delay: INSTRUMENTED && !filmForced ? 0 : 0.18 });
+  return true;
+}
+
+function reseedBoard(seed) {
+  bag = seededRng(seed);
+  cells = freshGrid();
+  paintBoard();
+}
+
+for (let r = 0; r < SIZE; r++) {
+  for (let c = 0; c < SIZE; c++) {
+    const gem = new QuadNode({ color: 0x000000 });
+    gem.interactive = true;
+    gem._r = r; gem._c = c; // FIXED cell identity — the model recolors, never moves
+    gem.setSize(CELL - 8, CELL - 8);
+    gem.setPos(10 + c * CELL + 4, 10 + r * CELL + 4);
+    gem.auditAllow('press'); // a stone's press is the PICK arm (the drag-arm ruling's kin)
+    gem.on('pointerenter', () => {
+      if (board.closest((n) => n.disabled === true)) return;
+      gem.fxOpacity = 0.8;
+    });
+    gem.on('pointerleave', () => { gem.fxOpacity = 1; });
+    gem.on('click', (e) => {
+      e.stopPropagation?.();
+      if (board.closest((n) => n.disabled === true)) return;
+      if (filmRunning) return; // a swap landing mid-cascade would tear the film
+      if (!picked) {
+        picked = gem;
+        gem.fxScale = 1.12; // the picked stone rises
+        return;
+      }
+      const prev = picked;
+      prev.fxScale = 1;
+      picked = null;
+      if (!adjacent(prev, gem) && prev !== gem) {
+        picked = gem; // a far click re-picks instead of scolding
+        gem.fxScale = 1.12;
+        return;
+      }
+      trySwap(prev, gem);
+    });
+    stones.push(gem);
+    board.add(gem);
+  }
+}
+cells = freshGrid();
+paintBoard();
+place(board, function () { this.setPos(Math.round((engine.width - this.w) / 2) - 60, 120); });
+engine.layers.overlay.add(board);
+
+// pooled point floaters — one pool, spawned at cleared-run centroids
+const floats = new FloatText({ pool: 8 });
+floats.setPos(0, 0);
+engine.layers.overlay.add(floats);
+
+// ---- the counters: score, moves, the clock, the star thresholds ----
+const movesText = new TextNode(`Moves: ${moves}`, {
+  font: FONTS.header, size: 14, smallCaps: true, letterSpacing: 1, color: COLORS.bone, shadow,
+});
+place(movesText, function () { this.setPos(board.x, 88); });
+engine.layers.overlay.add(movesText);
+const scoreText = new TextNode('Score: 0', {
+  font: FONTS.header, size: 14, smallCaps: true, letterSpacing: 1, color: COLORS.accent, shadow,
+});
+place(scoreText, function () { this.setPos(board.x, 66); });
+engine.layers.overlay.add(scoreText);
+const clock = new BigTimer({ seconds: 90, size: 22, running: !INSTRUMENTED });
+clock.on('timeout', () => winNow()); // the tide's own ending
+place(clock, function () { this.setPos(board.x + board.w - this.w, 78); });
+engine.layers.overlay.add(clock);
+// the star law: finish with >=8 moves left = 3, >=4 = 2, any win = 1
+function starsFor(movesLeft) { return movesLeft >= 8 ? 3 : movesLeft >= 4 ? 2 : 1; }
+const earned = new StarRating({ value: 0, max: 3 });
+earned.setDisabled(true); // a DISPLAY of the award, not an input
+place(earned, function () { this.setPos(board.x + Math.round((board.w - this.w) / 2), 84); });
+engine.layers.overlay.add(earned);
+
+// ---- the hint economy (Badge + a satchel that runs dry) ----
+// the verb is EXTRACTED so the button and the ground circle spend the
+// same satchel — one economy, two doors
+let hints = 3;
+const hintBtn = new Button('Hint', { minWidth: 96 });
+const hintBadge = attachBadge(hintBtn, { count: hints });
+const showHint = () => {
+  if (hints <= 0) return;
+  hints -= 1;
+  hintBadge.setCount(hints);
+  if (hints === 0) hintBtn.setDisabled(true); // the satchel runs dry
+  // the hint PROVES its move: the solver's first legal swap, both stones pulsed
+  const mv = findLegalMove(cells);
+  state.lastHint = mv;
+  if (!mv) return;
+  for (const [r, c] of [mv.a, mv.b]) {
+    const s = stoneAt(r, c);
+    if (!s) continue;
+    s.fxScale = 1.2;
+    if (!INSTRUMENTED) engine.ticker.tween(s, { fxScale: 1 }, { dur: 0.3 });
+    else s.fxScale = 1;
+  }
+};
+hintBtn.on('click', showHint);
+place(hintBtn, function () { this.setPos(board.x, board.y + board.h + 14); });
+engine.layers.overlay.add(hintBtn);
+
+// ---- the ending: a MODAL victory panel — bordered, titled, veiled, dismissable ----
+const tally = new ScoreTally({
+  lines: [], width: 300, modal: true, title: 'The Tide Yields',
+  onContinue: () => { /* the board waits beneath, still won until a level pick */ },
+});
+tally.visible = false;
+place(tally, function () {
+  this.setPos(Math.round((engine.width - this.w) / 2), Math.round((engine.height - this.h) / 2));
+});
+engine.layers.overlay.add(tally);
+// the rank thresholds — derived from play, never hardcoded
+function rankFor(total) { return total >= 1200 ? 'S' : total >= 800 ? 'A' : total >= 450 ? 'B' : 'C'; }
+function winNow() {
+  if (state.won) return;
+  state.won = true;
+  clock.stop();
+  earned.setDisabled(false);
+  earned.setValue(starsFor(moves), { silent: true });
+  earned.setDisabled(true);
+  // the tally derives from PLAY: score, the moves kept, the seconds held
+  const secondsLeft = Math.round(clock.value);
+  tally.setLines([
+    { label: 'Stones turned', value: score },
+    { label: 'Moves kept', value: moves * 15 },
+    { label: 'Tide bonus', value: secondsLeft * 5 },
+  ]);
+  tally.rank = rankFor(tally.total);
+  // the modal reveal raises the veil AND the panel above everything beneath —
+  // the buried-win class and the clickable-board-under-the-victory class both die here
+  tally.reveal();
+}
+const finishBtn = new Button('Finish', { minWidth: 96, onClick: winNow });
+place(finishBtn, function () { this.setPos(board.x + board.w - this.w, board.y + board.h + 14); });
+engine.layers.overlay.add(finishBtn);
+
+// ---- the level rail: LevelSelectGrid + SaveSlotList + the glue ----
+// every pool stands open at the shrine (locked-plate rest states live on
+// meta-screens.html — a locked plate at REST here would flag the states walker)
+const LEVELS = Array.from({ length: 8 }, (_, i) => ({
+  id: i + 1, label: 'IVXLCDM'[i % 7] + (i + 1),
+  state: i < 3 ? 'done' : 'open',
+  stars: i < 3 ? (i % 3) + 1 : 0,
+}));
+const rail = new UINode({ name: 'level-rail' });
+const railBg = new NineSliceNode(engine.textures.frame('panel.dark'));
+// STYLE 1a.1: "The Coin-Op Shrine" named the mood and hid the function. It is a level
+// picker. It also carried a SaveSlotList, which is a widget with no job on a match-three
+// board - nothing saved, nothing loaded, nothing to click for - and that is most of why
+// the panel read as incomprehensible. SaveSlotList is showcased on meta-screens, where
+// choosing a save is a real act.
+const railTitle = new TextNode('Levels', {
+  font: FONTS.header, size: 13, smallCaps: true, letterSpacing: 2, color: COLORS.accent, shadow,
+});
+const grid = new LevelSelectGrid({ levels: LEVELS, cols: 4, pageSize: 8 });
+// the glue rides the EVENT (real clicks and drills both dispatch `select`):
+// picking a level resets the board's budget — the flow, not a loader
+grid.on('select', (e) => {
+  reseedBoard(0x3141 ^ ((e?.id ?? 1) * 0x9e37)); // each pool is its own seeded tide
+  moves = 12;
+  score = 0;
+  state.won = false;
+  state.waves = [];
+  picked = null;
+  movesText.setText(`Moves: ${moves}`);
+  scoreText.setText('Score: 0');
+  tally.dismiss(); // panel AND veil down — the fresh pool is playable at once
+  clock.setValue(90);
+  if (!INSTRUMENTED) clock.start();
+  levelLine.setText(`Level ${e?.id ?? '?'} started — 12 moves, 90 seconds.`);
+});
+const levelLine = new TextNode('Pick a level — each one deals a different board. Stars show your best.', {
+  size: 11, color: COLORS.textMuted, shadow, maxWidth: 432, ellipsis: true,
+});
+rail.add(railBg, railTitle, grid, levelLine);
+railBg.setRect(0, 0, 460, 296);
+railTitle.setPos(14, 12);
+grid.setPos(14, 40);
+levelLine.setPos(14, 258);
+rail.setSize(460, 296);
+place(rail, function () { this.setPos(engine.width - this.w - 28, 100); });
+engine.layers.overlay.add(rail);
+
+// ?pose=win (with ?freeze=1): boots straight into the landed victory panel —
+// the ending is a reviewable artifact, not a moment only a live win can see
+if (FROZEN && params.get('pose') === 'win') {
+  Eldritch.reducedMotion = true; // the pose lands instantly and exactly
+  winNow();
+  Eldritch.reducedMotion = false;
+}
+
+// ---- READY / ASSERT ----
+if (!ASSERT) {
+  setTimeout(() => {
+    document.title = window.__errs.length ? 'ARCADE BOOT FAIL: ' + window.__errs[0] : 'ARCADE READY';
+  }, 1000);
+} else {
+  (async () => {
+    const results = [];
+    let fails = 0;
+    const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    await wait(400); // settle the boot
+
+    ok('boot: the arcade stands (board, counters, rail, tally hidden)',
+      window.__errs.length === 0 && stones.length === 36 && moves === 12
+      && score === 0 && tally.visible === false && hints === 3);
+    ok('boot: the seeded board holds no ready-made matches', findRuns(cells).size === 0);
+    ok('boot: the seeded board holds at least one legal move', findLegalMove(cells) !== null);
+
+    // ---- the real loop: the solver's move commits, scores, and refills whole ----
+    const mv = findLegalMove(cells);
+    const sA = stoneAt(...mv.a), sB = stoneAt(...mv.b);
+    const swapped = trySwap(sA, sB);
+    ok('board: the solver-found swap commits, spends a move, and scores',
+      swapped === true && moves === 11 && score > 0 && state.waves.length >= 1);
+    ok('board: every wave obeys 10 × stones × cascade',
+      state.waves.every((w) => w.gained === w.cleared * 10 * w.mult)
+      && state.waves[0].mult === 1);
+    ok('board: gravity leaves no holes (36 stones, every cell filled)',
+      cells.every((row) => row.every((v) => v >= 0)));
+
+    // a NO-match swap bounces free: hunt an adjacent pair that matches nothing
+    let missPair = null;
+    outer: for (let r = 0; r < SIZE; r++) {
+      for (let c = 0; c < SIZE - 1; c++) {
+        const g = cells.map((row) => [...row]);
+        [g[r][c], g[r][c + 1]] = [g[r][c + 1], g[r][c]];
+        if (findRuns(g).size === 0) { missPair = [stoneAt(r, c), stoneAt(r, c + 1)]; break outer; }
+      }
+    }
+    const movesBefore = moves, scoreBefore = score, snapshot = cells.map((row) => row.join(',')).join('|');
+    const missed = missPair ? trySwap(missPair[0], missPair[1]) : null;
+    ok('board: a matchless swap bounces back and spends NOTHING',
+      missed === false && moves === movesBefore && score === scoreBefore
+      && cells.map((row) => row.join(',')).join('|') === snapshot);
+    ok('board: distant stones refuse and spend nothing',
+      trySwap(stoneAt(0, 0), stoneAt(3, 3)) === false && moves === movesBefore);
+
+    // ---- the hint economy: a PROVEN move, then the satchel runs dry ----
+    hintBtn.dispatch('click', {});
+    const h = state.lastHint;
+    const gh = cells.map((row) => [...row]);
+    [gh[h.a[0]][h.a[1]], gh[h.b[0]][h.b[1]]] = [gh[h.b[0]][h.b[1]], gh[h.a[0]][h.a[1]]];
+    ok('hints: the hinted swap provably matches', h !== null && findRuns(gh).size > 0 && hints === 2);
+    hintBtn.dispatch('click', {});
+    hintBtn.dispatch('click', {});
+    ok('hints: three spends empty the satchel and seal the button',
+      hints === 0 && hintBadge.count === 0 && hintBtn.disabled === true);
+    hintBtn.dispatch('click', {});
+    ok('hints: a dry satchel refuses politely', hints === 0);
+
+    // ---- the finish derives from PLAY (the test suite pin rides reducedMotion) ----
+    Eldritch.reducedMotion = true;
+    const dones = [];
+    tally.on('tallydone', (e) => dones.push(e.total));
+    const secondsAtWin = Math.round(clock.value);
+    winNow();
+    const expectTotal = score + moves * 15 + secondsAtWin * 5;
+    ok('finish: the tally derives from play (score + moves kept + tide bonus)',
+      tally.revealed === true && dones.length === 1 && dones[0] === expectTotal
+      && tally._rows.map((r) => r.value._text).join(',') === `${score},${moves * 15},${secondsAtWin * 5}`);
+    ok('finish: the rank seal stamps the threshold law',
+      tally.rankText.visible === true && tally.rankText._text === rankFor(expectTotal));
+    ok('stars: the moves-kept law awards the display', earned.value === starsFor(moves));
+
+    // ---- the modal law: the veil dims the scene, the panel rides above it,
+    //      and Continue hands the board back ----
+    await wait(60); // a frame: renumber seats the veil + re-appended panel last
+    ok('finish: the veil and the panel both paint OVER the rail',
+      tally.scrim != null && tally.scrim.visible === true
+      && engine.paintList.indexOf(tally) > engine.paintList.indexOf(rail)
+      && engine.paintList.indexOf(tally) > engine.paintList.indexOf(tally.scrim)
+      && engine.paintList.indexOf(tally.scrim) > engine.paintList.indexOf(rail));
+    ok('finish: the veil SWALLOWS the board (the probe lands on the veil, not a stone)',
+      (() => { const s = stoneAt(3, 3); const h = hitTest(engine, s.worldX + s.w / 2, s.worldY + s.h / 2);
+        return h === tally.scrim || tally.scrim.isAncestorOf?.(h); })());
+    ok('finish: the landed ending offers Continue', tally.continueBtn.visible === true);
+    tally.continueBtn.dispatch('click', {});
+    await wait(60);
+    ok('continue: the veil tears down and the board answers hits again',
+      tally.visible === false && tally.scrim.visible === false
+      && (() => { const s = stoneAt(3, 3); const h = hitTest(engine, s.worldX + s.w / 2, s.worldY + s.h / 2);
+        return h === s; })());
+
+    // ---- skip mid-reveal under REAL motion: lands exact, commits once ----
+    Eldritch.reducedMotion = false;
+    const t2 = new ScoreTally({
+      lines: [{ label: 'A', value: 1000 }, { label: 'B', value: 500 }], rank: 'B', countDur: 0.5,
+    });
+    t2.setPos(60, 500);
+    engine.layers.overlay.add(t2);
+    const dones2 = [];
+    t2.on('tallydone', (e) => dones2.push(e.total));
+    t2.reveal();
+    await wait(120); // the first line is mid-count
+    t2.skip();
+    await wait(650); // the canceled tween must NOT resurrect anything
+    ok('tally: a mid-count skip lands every number exactly and commits ONCE',
+      dones2.length === 1 && dones2[0] === 1500
+      && t2._rows.map((r) => r.value._text).join(',') === '1000,500');
+    t2.dispose();
+
+    // ---- the level glue: a pick reseeds the whole pool ----
+    grid.dispatch('select', { id: 2 });
+    ok('glue: picking a level reseeds the pool (budget, score, a fresh clean board)',
+      moves === 12 && score === 0 && state.won === false && tally.visible === false
+      && findRuns(cells).size === 0 && findLegalMove(cells) !== null);
+
+    // ---- the clock's own ending: timeout finishes the run ----
+    clock.setValue(0.05);
+    clock.start();
+    await wait(200);
+    ok('finish: the clock timeout ends the run through the same door',
+      state.won === true && clock.running === false);
+
+    // ---- the NaN laws ----
+    const nanT = new ScoreTally({ width: NaN, countDur: NaN, lines: [{ label: 'X', value: NaN }] });
+    ok('nan: the tally guards its defaults and a NaN line reads zero',
+      nanT._w === 300 && nanT.countDur === 0.6 && nanT.lines[0].value === 0);
+    nanT.dispose();
+
+    // ---- THE FILM, FINALLY ON THE RECORD ----
+    // Every assert above reads the synchronous model, so a resolve with no
+    // animation at all stayed green (bug lived exactly there). The
+    // projector switch runs the real reel under this suite only; the censuses
+    // and the frozen shot still see a parked board.
+    const rmFilm = Eldritch.reducedMotion;
+    Eldritch.reducedMotion = false; // the reel needs real tweens
+    grid.dispatch('select', { id: 3 }); // a fresh pool: score 0, waves [], won false
+    window.__arcade.forceFilm(true);
+    const fmv = findLegalMove(cells);
+    // the wave-1 clear set, derived exactly the way resolveCascades will derive it
+    const fsim = cells.map((row) => [...row]);
+    [fsim[fmv.a[0]][fmv.a[1]], fsim[fmv.b[0]][fmv.b[1]]] = [fsim[fmv.b[0]][fmv.b[1]], fsim[fmv.a[0]][fmv.a[1]]];
+    const wave1 = [...findRuns(fsim)].map((k) => k.split(',').map(Number));
+    const fA = stoneAt(...fmv.a), fB = stoneAt(...fmv.b);
+    const filmSwap = trySwap(fA, fB);
+    const modelSnap = cells.map((row) => row.join(',')).join('|'); // the synchronous half's verdict
+    // flips if the reel never opens (filmRunning stays false) or the slide is
+    // gone (both stones sit at rest instead of starting from the other cell)
+    ok('film: the swap opens the reel — filmRunning, and both stones start from the other cell',
+      filmSwap === true && window.__arcade.filmRunning() === true
+      && Math.abs(fA.fxOffsetX) + Math.abs(fA.fxOffsetY) > 0
+      && Math.abs(fB.fxOffsetX) + Math.abs(fB.fxOffsetY) > 0);
+    // the lock beat, SAMPLED not scheduled (the poll and the tweens ride the same
+    // clock, so a slow tick cannot fake a failure): between the slide and the
+    // clear, a matched stone must stand ENLARGED while still fully visible. If
+    // the film is dead — the row repaints instantly — no cleared stone ever
+    // leaves fxScale 1 while opaque, and the poll times out false.
+    let sawLock = false;
+    for (let i = 0; i < 14 && !sawLock; i++) {
+      await wait(40);
+      sawLock = wave1.some(([r, c]) => {
+        const s = stoneAt(r, c);
+        return s.fxScale > 1.05 && s.fxOpacity > 0.9;
+      });
+    }
+    ok('film: mid-clear the matched stones LOCK — still present and enlarged, not instantly gone', sawLock);
+    // the reel ends where the model already was: presentation changed, truth did not
+    const wavesN = state.waves.length;
+    await wait(600 + wavesN * 700); // delay 0.18 + ~0.52/wave + tween tails, with slack
+    ok('film: the reel ends at rest — filmRunning false, every fx home, the model untouched',
+      window.__arcade.filmRunning() === false
+      && stones.every((s) => s.fxOffsetX === 0 && s.fxOffsetY === 0 && s.fxScale === 1 && s.fxOpacity === 1)
+      && cells.map((row) => row.join(',')).join('|') === modelSnap);
+    window.__arcade.forceFilm(false);
+    Eldritch.reducedMotion = rmFilm;
+
+    // ---- the cascade LAW, unpinned until now ----
+    // The wave-record assert above compares fields written from the same variables
+    // in one expression; the LAW it mirrors (score is the sum of the waves, and a
+    // second wave doubles) was never held to. First: the sum, over the film's
+    // real resolve — flips if any wave scores outside its own record.
+    ok('law: the score is exactly the sum of every recorded wave',
+      state.waves.length >= 1 && score === state.waves.reduce((a, w) => a + w.gained, 0));
+    // Then a board BUILT to cascade twice: clearing the three 1s in column 2
+    // drops the 0 from r1c2 into r4c2, completing 0-0-0 across row 4 with
+    // survivors already in place — structural, so the bag's refills (rows 0-2)
+    // can only ADD waves, never remove wave two.
+    grid.dispatch('select', { id: 4 }); // zero the ledger: score 0, waves []
+    const CRAFT = [
+      [2, 3, 3, 2, 3, 2],
+      [3, 2, 0, 3, 2, 3],
+      [2, 3, 1, 2, 3, 2],
+      [3, 2, 1, 3, 2, 3],
+      [3, 0, 3, 0, 3, 2],
+      [2, 3, 1, 2, 2, 3],
+    ];
+    for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) cells[r][c] = CRAFT[r][c];
+    paintBoard();
+    ok('law: the crafted board rests clean — no ready-made runs, the trap set', findRuns(cells).size === 0);
+    trySwap(stoneAt(4, 2), stoneAt(5, 2)); // filmForced is OFF: the resolve is synchronous
+    ok('law: one swap cascades — wave two carries mult 2 and the sum law holds whole',
+      state.waves.length >= 2 && state.waves[0].mult === 1 && state.waves[1].mult === 2
+      && score === state.waves.reduce((a, w) => a + w.gained, 0));
+
+    // the ground circle: right-click beside the board opens the wheel,
+    // and the nested Pool 2 pick starts pool 2 through the level grid's own glue
+    {
+      const g = window.__arcade.ground();
+      engine.bus.emit('pointerdown', { x: 200, y: 620, button: 2, pointerId: 98, target: null, native: null });
+      await wait(60);
+      ok('ground: a right-click beside the board opens the wheel', g.isOpen === true);
+      g._setIndex(1, false); // Pools
+      g.onActivate();
+      await wait(40);
+      g._setIndex(1, false); // Pool 2
+      g.onActivate();
+      await wait(120);
+      ok('ground: the nested Pool 2 pick starts the pool through the grid\'s glue',
+        g.isOpen === false && levelLine._text.startsWith('Level 2 started'));
+    }
+
+    // the last word: __errs was read once at t=400ms (the boot assert) and never
+    // again — a film tween throwing, a bad refill, any late console.error would
+    // otherwise leave the title green. This line makes the whole run answer.
+    ok('no errors reached the console during the run', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;max-height:95vh;overflow:auto;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:10px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `ARCADE ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+}
+</script>
+</body>
+</html>

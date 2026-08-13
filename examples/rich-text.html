@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Rich Text</title>
+<!-- @demo   The markup sampler: styled runs, inline icons, a live editor, non-Latin torture strings on a scriptorium desk — and every column re-wraps live as its window resizes.
+     @shows  EldWindow, EventLog, EldToast, RadialMenu, Button, TextField, VBox, TextNode, UINode, QuadNode
+     @params ?freeze=1 — bit-stable snapshot boot (no ambiance, seeded log) · ?assert=1 — the in-page suite titles its own PASS count -->
+
+<!-- the proof page, rebuilt on the layout engine (the design requirement): every body
+     TextNode rides fitWidth (the reflow contract — width is a layout INPUT), the
+     content columns glue themselves to the window lane, and resizing a window
+     re-wraps every sample live. Window one samples every markup form ({color}/{b}/
+     {i}/{icon}/escapes) plus run-preserving wrap and a lane-tracked ellipsis. Window
+     two is a live editor: type markup, watch it render, submit into a markup-opted
+     EventLog or toast it. Window three tortures the measurer with CJK, Cyrillic,
+     Greek, Arabic (RTL is a documented limitation — everything renders
+     left-to-right), and unbroken tokens — all reflowing with the window. -->
+<style>html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#04060a}</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+// Boot-health protocol: any error surfaces in the title so headless DOM dumps can gate
+// on it (the page manifest lists this page as READY). Hooks must precede the module script.
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {
+  Eldritch, EldWindow, EldToast,
+  Button, TextField, EventLog, RadialMenu,
+  VBox, TextNode, UINode, QuadNode,
+  runAudit, COLORS, FONTS,
+} from '../src/lovecraft-ui.js';
+
+// ?freeze=1 (snapshots) and ?assert=1 (the in-page suite) both need real frames
+// under headless dump-dom, where rAF never fires — the timer-driven clock
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+Eldritch.init(FROZEN || ASSERT
+  ? { background: false, vignette: false, timerDriven: true, contextMenu: false }
+  : { contextMenu: false }); // the ground circle rides right-click
+const engine = Eldritch.engine;
+
+// the icon pack: the procedural ability art died — the REAL icons
+// re-skin these names in place; fallback 'none' keeps the loud plate when
+// assets/ is absent, and FROZEN skips the async decode (the frozen-shelf law)
+if (!FROZEN) {
+  Eldritch.loadIcons({
+    base: '../assets/icons', fallback: 'none',
+    icons: [
+      { id: 'ico-3649', as: 'book' },
+    ],
+  });
+}
+
+window.engine = engine;
+
+const shadow = { color: 'rgba(0,0,0,0.85)', dx: 1, dy: 1, blur: 2 };
+
+// ---- the scriptorium: ONE page-owned canvas, registry-free ----
+// The three windows sat over #04060a with the right quarter of the frame empty. The
+// markup work below is sound and is unchanged; it now happens at a desk.
+const scriptorium = new UINode({ name: 'scriptorium' });
+const sCanvas = document.createElement('canvas');
+const sTex = new THREE.CanvasTexture(sCanvas);
+sTex.colorSpace = THREE.SRGBColorSpace;
+sTex.minFilter = THREE.LinearFilter;
+sTex.magFilter = THREE.LinearFilter;
+sTex.generateMipmaps = false;
+const sQuad = new QuadNode({ texture: sTex });
+scriptorium.add(sQuad);
+engine.layers.background.add(scriptorium);
+scriptorium.on('dispose', () => sTex.dispose());
+const srnd = (n) => { let s = n; return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff; };
+
+function paintScriptorium() {
+  const W = Math.max(2, Math.round(engine.width)), H = Math.max(2, Math.round(engine.height));
+  if (sCanvas.width !== W || sCanvas.height !== H) { sCanvas.width = W; sCanvas.height = H; }
+  const ctx = sCanvas.getContext('2d');
+  ctx.fillStyle = '#0c0a08';
+  ctx.fillRect(0, 0, W, H);
+
+  // the desk itself, filling the frame: long boards under everything
+  const r = srnd(4409);
+  for (let x = -40; x < W; x += 118) {
+    ctx.fillStyle = `rgba(26,20,15,${0.86 + r() * 0.14})`;
+    ctx.fillRect(x, 0, 118, H);
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x + 0.5, 0); ctx.lineTo(x + 0.5, H); ctx.stroke();
+    ctx.strokeStyle = 'rgba(96,78,54,0.07)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x + 3.5, 0); ctx.lineTo(x + 3.5, H); ctx.stroke();
+  }
+
+  // drying pages pinned along the top edge, curling
+  const p = srnd(7717);
+  for (let i = 0; i < 7; i++) {
+    const px = 40 + i * Math.max(90, (W - 120) / 7), py = -18 + p() * 12;
+    const pw = 78 + p() * 26, ph = 96 + p() * 30;
+    if (px + pw > W) break;
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate((p() - 0.5) * 0.10);
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(3, 4, pw, ph);
+    ctx.fillStyle = 'rgba(58,54,44,0.42)';
+    ctx.fillRect(0, 0, pw, ph);
+    ctx.strokeStyle = 'rgba(140,132,110,0.10)'; ctx.lineWidth = 1;
+    for (let k = 3; k < 9; k++) {
+      const y = (k * ph) / 10;
+      ctx.beginPath(); ctx.moveTo(7, y); ctx.lineTo(pw - 7 - p() * 22, y); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // The candle: a working scriptorium has exactly one light. Anchored to the strip of
+  // desk BELOW the windows rather than to a fraction of the frame - at H*0.70 it sat
+  // behind Other Tongues and only its glow ever reached the viewer.
+  const cx = Math.round(W * 0.90), cy = Math.min(H - 34, DESK.y + DESK.h + 40);
+  const pool = ctx.createRadialGradient(cx, cy, 8, cx, cy, Math.max(W, H) * 0.66);
+  pool.addColorStop(0, 'rgba(238,206,132,0.15)');
+  pool.addColorStop(0.42, 'rgba(238,206,132,0.045)');
+  pool.addColorStop(1, 'rgba(238,206,132,0)');
+  ctx.fillStyle = pool;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(214,206,186,0.30)';
+  ctx.fillRect(cx - 6, cy - 4, 12, 46);
+  ctx.fillStyle = 'rgba(246,224,150,0.65)';
+  ctx.beginPath(); ctx.ellipse(cx, cy - 12, 4, 9, 0, 0, Math.PI * 2); ctx.fill();
+
+  // the inkwell and a laid-down quill, on the same strip of desk
+  const ix = Math.round(W * 0.06), iy = Math.min(H - 26, DESK.y + DESK.h + 48);
+  ctx.fillStyle = 'rgba(0,0,0,0.62)';
+  ctx.beginPath(); ctx.ellipse(ix, iy, 22, 9, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(30,34,32,0.9)';
+  ctx.beginPath(); ctx.ellipse(ix, iy - 5, 18, 7, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(150,144,126,0.20)'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(ix + 16, iy - 10);
+  ctx.quadraticCurveTo(ix + 74, iy - 44, ix + 128, iy - 32);
+  ctx.stroke();
+
+  // a spill, long dry
+  ctx.fillStyle = 'rgba(8,12,14,0.55)';
+  ctx.beginPath();
+  ctx.ellipse(Math.round(W * 0.36), Math.min(H - 18, DESK.y + DESK.h + 56), 90, 13, 0.06, 0, Math.PI * 2);
+  ctx.fill();
+
+  sTex.needsUpdate = true;
+}
+// ---- the desk: three lanes sized from the FRAME, not from three fixed corners ----
+// ONE floor, shared by the window that declares it and the suite that drives it there.
+// The reflow proof narrows the sampler to this width; when the two were a ctor option
+// and a literal in the suite, sizing the desk from the frame moved the resting width
+// toward the probe and the proof quietly stopped proving anything. The sibling lanes
+// share the same law (3.2.x review): each window's floor and the input replay that narrows
+// it read ONE constant, so the probe can never drift away from the declaration.
+const SAMPLER_MIN = 320;
+const QUILL_MIN = 360;
+const TONGUES_MIN = 320;
+const DESK = (() => {
+  const W = Math.round(engine.width), H = Math.round(engine.height);
+  const M = 24, GUT = 16, TOP = 16, TASKBAR = 46;
+  const h = Math.max(240, H - TASKBAR - 16 - TOP);
+  const leftW = Math.max(SAMPLER_MIN, Math.round((W - M * 2 - GUT) * 0.40));
+  const rightX = M + leftW + GUT;
+  const rightW = Math.max(320, W - M - rightX);
+  const topH = Math.round(h * 0.49);
+  return { x: M, y: TOP, leftW, rightX, rightW, h, topH,
+           botY: TOP + topH + GUT, botH: h - topH - GUT };
+})();
+// ZERO-SIZED wrapper: a sized full-screen node overlaps every sibling in the census.
+// Assigned AFTER the DESK block on purpose (3.2.x review): paintScriptorium reads
+// DESK, and an onLayout armed above the const was one early layout flush away from
+// a temporal-dead-zone throw at boot.
+scriptorium.onLayout = function () {
+  sQuad.setRect(0, 0, Math.round(engine.width), Math.round(engine.height));
+  paintScriptorium();
+};
+
+// The reflow column: a stretch VBox glued to the window's content lane, so a window
+// resize drives every fitWidth child to a new wrap width (the design requirement's demo spine).
+// The glue WRAPS the box's own onLayout (the rule: never replace, wrap).
+const laneColumn = (win, opts = {}) => {
+  // padding.b is 0, not 10: a reflow column's declared bottom is its
+  // INK, not its breathing — the window frame's inset already breathes. The
+  // 10px claim meant that when a DESK lane cut through the padding band, the
+  // scroll range that armed held nothing (the phantom-range audit caught the
+  // Non-Latin lane doing exactly that at the test suite viewport: 231..240px of
+  // rail over the column's own empty padding).
+  const root = new VBox({
+    padding: { t: 8, r: 10, b: 0, l: 10 }, gap: 6,
+    align: 'stretch', autoWidth: false, autoHeight: true, ...opts,
+  });
+  const lay = Object.getPrototypeOf(Object.getPrototypeOf(root)).onLayout;
+  root.onLayout = function () {
+    const w = win.contentArea.boxW;
+    if (w > 0 && w !== this.w) this.setSize(w, this.h);
+    lay.call(this);
+  };
+  return root;
+};
+
+// a single-line caption keeps its honest raster width (stretch must not lie it wide)
+const caption = (t) => {
+  const n = new TextNode(t, { size: 11, color: COLORS.textFaint, shadow });
+  n.layoutStretch = false;
+  return n;
+};
+
+// ---- window one: the sampler — every markup form, re-wrapping live ----
+let sampler = null;
+const samplerWin = EldWindow.create({
+  title: 'Markup Samples', x: DESK.x, y: DESK.y, width: DESK.leftW, height: DESK.h,
+  minWidth: SAMPLER_MIN, minHeight: 300,
+  content: (c, win) => {
+    const root = laneColumn(win);
+    const sample = (t, extra = {}) => {
+      const n = new TextNode(t, { size: 13, color: COLORS.text, markup: true, fitWidth: true, shadow, ...extra });
+      root.add(n);
+      return n;
+    };
+    root.add(caption('Color runs'));
+    sample('{color:#e8c86a}Gilded{/} words among the plain, and {color:#9a7ff0}void-purple{/} ones.');
+    root.add(caption('Nesting stacks and pops'));
+    sample('{color:#6fd18b}green {b}bold green{/} green again{/} and plain.');
+    root.add(caption('Weight and slant'));
+    sample('{b}Bold{/}, {i}italic{/}, and {b}{i}both at once{/}{/}.');
+    root.add(caption('Inline icons ride the line'));
+    sample('Bind {icon:fireball} balefire, raise {icon:shield} the ward, read {icon:book} the tome.');
+    root.add(caption('Escapes and forgiveness'));
+    sample('A doubled brace {{color} renders literally; an unknown {sparkle} tag stays as typed.');
+    root.add(caption('Styling survives the wrap — resize the window and watch it re-flow'));
+    const wrap = sample('{color:#ff5544}Crimson{/} beginnings that run long enough to wrap onto further lines while the {b}bold tail{/} keeps its weight wherever the break falls.');
+    root.add(caption('Run-aware ellipsis, re-truncated to the lane'));
+    const ELL_TEXT = '{color:#6fd18b}Verdigris{/} opening with a tail far too long for the room it was given to live in.';
+    const ell = new TextNode(ELL_TEXT, { size: 13, color: COLORS.text, markup: true, ellipsis: true, maxWidth: 390, shadow });
+    ell.layoutStretch = false;
+    root.add(ell);
+    root.add(caption('Clickable links and highlight fills (click a lit noun)'));
+    const prose = new TextNode(
+      'A {link:door}heavy oaken door{/} stands {hl:#3a2a10}{color:#e8d86a}ajar{/}{/}; a {link:rat}grey rat{/} watches.',
+      { size: 13, color: COLORS.text, markup: true, fitWidth: true, shadow });
+    prose.interactive = true; // the raw-TextNode link opt-in
+    prose.on('linkclick', (e) => EldToast.show({ title: 'linkclick', message: `{b}${e.id}{/} — "${e.text}"`, markup: true, duration: 2.5 }));
+    root.add(prose);
+
+    // the ellipsis clamp follows the lane (single-line truncation cannot ride
+    // fitWidth — fitWidth implies wrapping; setMaxWidth is its honest clamp)
+    const lay = root.onLayout;
+    root.onLayout = function () {
+      lay.call(this);
+      const w = this.w - 20;
+      if (w > 40) ell.setMaxWidth(w); // the ellipsis re-clamps to the lane
+    };
+    c.add(root);
+    sampler = { win, wrap, ell, prose };
+  },
+});
+
+// ---- window two: the living quill — type markup, render it, log it, toast it ----
+let quill = null;
+const quillWin = EldWindow.create({
+  title: 'Markup Editor — type and see it render', x: DESK.rightX, y: DESK.y, width: DESK.rightW, height: DESK.topH,
+  minWidth: QUILL_MIN, minHeight: 260,
+  content: (c, win) => {
+    // The editor lane is the one column of FIXED-height parts inside a
+    // viewport-derived DESK lane — at some heights its own bottom padding
+    // tipped 1px past the box and the +8 measure pad armed a 9px rail over
+    // nothing (range audit caught it at the test suite viewport).
+    // The column glues to the lane's HEIGHT and the scrollback FLEXES into the
+    // leftover, so the content fills the lane exactly at every viewport; a
+    // window shrunk below the fixed parts overflows onto REAL ink.
+    const root = laneColumn(win, { gap: 10, autoHeight: false });
+    const preview = new TextNode('', { size: 14, color: COLORS.text, markup: true, fitWidth: true, shadow });
+    const field = new TextField({
+      width: 394,
+      value: '{color:#6fd18b}Speak{/} with {b}weight{/}', // short enough to boot unscrolled
+    });
+    preview.setText(field.value);
+    field.on('input', (e) => preview.setText(e.value));
+
+    const toastBtn = new Button('Toast It', {
+      onClick: () => EldToast.show({
+        title: 'The Quill Speaks', message: field.value, variant: 'info', icon: 'book', markup: true,
+      }),
+    });
+    toastBtn.layoutStretch = false; // a button keeps its slab width
+
+    // the retrofit corner: a markup-opted scrollback — Enter in the field writes into it
+    const log = new EventLog({ width: 400, height: 80, markup: true, register: false });
+    field.on('submit', (e) => { if (e.value.trim()) log.log(e.value, 'QUILL'); });
+    if (FROZEN) log.append('[--:--:--]', 'QUILL', 'Lines land here {icon:book} styled.');
+    else log.log('Lines land here {icon:book} styled.', 'QUILL');
+
+    log.layoutFlex = 1; // the scrollback absorbs the lane's leftover height
+    root.add(preview, field, toastBtn, log);
+    const glue = root.onLayout;
+    root.onLayout = function () {
+      const bh = win.contentArea.boxH;
+      if (bh > 0 && bh !== this.h) this.setSize(this.w, bh);
+      glue.call(this);
+    };
+    c.add(root);
+    quill = { win, field, preview, log };
+  },
+});
+
+// ---- window three: other tongues — the measurer under torture, reflowing ----
+let tongues = null;
+const tonguesWin = EldWindow.create({
+  title: 'Non-Latin Text — resize to re-wrap', x: DESK.rightX, y: DESK.botY, width: DESK.rightW, height: DESK.botH,
+  minWidth: TONGUES_MIN, minHeight: 220,
+  content: (c, win) => {
+    const root = laneColumn(win);
+    const entry = (capText, bodyText, extra = {}) => {
+      root.add(caption(capText));
+      const body = new TextNode(bodyText, { size: 13, color: COLORS.text, fitWidth: true, shadow, ...extra });
+      root.add(body);
+      return body;
+    };
+    const jp = entry('Japanese — no-space text wraps by characters',
+      '深淵の言葉は文字単位で折り返され、行の終わりを恐れない。');
+    entry('Japanese with markup — runs cross scripts',
+      '深淵で{color:#6fd18b}翠緑の光{/}が瞬く — {icon:deathkiss} 死の接吻', { markup: true });
+    entry('Cyrillic and Greek measure like any other letters',
+      'Старые боги ждут под волнами · το φως δεν φτάνει εδώ κάτω.');
+    entry('Arabic renders LEFT-TO-RIGHT — the documented RTL limitation (COOKBOOK)',
+      'العربية تُرسم هنا من اليسار إلى اليمين');
+    entry('An unbroken token falls back to character wrap',
+      'Iäfhtagn'.repeat(9));
+    c.add(root);
+    tongues = { win, jp };
+  },
+});
+
+window.__richtext = { sampler, quill, tongues, ground: () => ground };
+
+// ---- the ground circle: right-click on the desk opens the wheel —
+// the quill's two outputs (the same toast the button speaks; the same scrollback
+// line Enter writes), from anywhere on the scriptorium floor.
+const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ items: [
+ { id: 'quill', label: 'Quill', children: [
+ { id: 'toast', label: 'Toast It' },
+ { id: 'log', label: 'Log It' },
+ ] },
+ ],
+});
+ground.on('select', ({ id, path }) => {
+  if (path[0] !== 'quill') return;
+  if (id === 'toast') EldToast.show({ title: 'The Quill Speaks', message: quill.field.value, variant: 'info', icon: 'book', markup: true });
+  else if (quill.field.value.trim()) quill.log.log(quill.field.value, 'QUILL');
+});
+engine.bus.on('pointerdown', (e) => {
+  if (e.button !== 2 || e.target) return;
+  ground.toggle(e.x, e.y);
+});
+
+// ---- ?assert=1: the in-page suite (the design requirement gated: reflow is real) ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    await wait(500); // boxes converge, lanes adopt, first rasters land
+
+    // Mandate 9's headline: narrowing the window re-wraps the sample TALLER. Drive it
+    // to its OWN floor rather than to a literal 330 - a fixed probe width measures the
+    // delta between the resting width and a magic number, so it silently stops proving
+    // anything the moment the resting width moves toward it. That is exactly what
+    // happened when the desk began sizing this window from the frame: at 420 wide with
+    // a 320 floor, the narrowed lane still fitted the same three lines.
+    const w0 = sampler.win.w;
+    const wrapH0 = sampler.wrap.h;
+    const ellW0 = sampler.ell.w;
+    // the invariant L159 quietly maintains, stated out loud: with no headroom above
+    // the floor the narrowing drive is a no-op and `grew` fails confusingly
+    ok(`the sampler rests above its floor [${w0}px > ${SAMPLER_MIN}px]`, w0 > SAMPLER_MIN);
+    sampler.win.setRect(sampler.win.x, sampler.win.y, SAMPLER_MIN, sampler.win.h);
+    await wait(150);
+    const narrowH = sampler.wrap.h;
+    const grew = sampler.wrap.h > wrapH0;
+    const reclamped = sampler.ell.w < ellW0;
+    sampler.win.setRect(sampler.win.x, sampler.win.y, w0, sampler.win.h);
+    await wait(150);
+    ok(`resizing the sampler re-wraps the prose live [${w0}px: ${wrapH0} -> ${SAMPLER_MIN}px: ${narrowH} -> back: ${sampler.wrap.h}]`,
+      grew && sampler.wrap.h === wrapH0);
+    ok('the ellipsis re-truncates to the lane', reclamped && sampler.ell.w === ellW0);
+
+    // the measurer reflows other tongues the same way
+    // CAPTURE the resting width, never a literal: a hard-coded restore silently stops
+    // restoring the moment the desk lays the window out from the frame instead
+    const tw0 = tongues.win.w;
+    const jpH0 = tongues.jp.h;
+    tongues.win.setRect(tongues.win.x, tongues.win.y, TONGUES_MIN, tongues.win.h);
+    await wait(150);
+    const jpGrew = tongues.jp.h > jpH0;
+    tongues.win.setRect(tongues.win.x, tongues.win.y, tw0, tongues.win.h);
+    await wait(150);
+    ok('character-wrapped Japanese reflows with the window', jpGrew && tongues.jp.h === jpH0);
+
+    // the quill: a keystroke renders, a submit lands in the styled scrollback
+    quill.field.dispatch('input', { value: '{b}ink{/} on the water' });
+    await wait(80);
+    const rendered = quill.preview.h > 0 && quill.preview._markupRaw === '{b}ink{/} on the water';
+    const n0 = quill.log.entries.length;
+    quill.field.dispatch('submit', { value: '{i}a submitted line{/}' });
+    await wait(80);
+    ok('the quill renders keystrokes and logs submits', rendered && quill.log.entries.length === n0 + 1);
+
+    // the field itself follows the lane on a quill resize
+    const fw0 = quill.field.w;
+    const qw0 = quill.win.w;               // captured, for the same reason
+    quill.win.setRect(quill.win.x, quill.win.y, QUILL_MIN, quill.win.h);
+    await wait(150);
+    const tracked = quill.field.w < fw0;
+    quill.win.setRect(quill.win.x, quill.win.y, qw0, quill.win.h);
+    await wait(150);
+    ok('the quill field follows the window lane', tracked && quill.field.w === fw0);
+
+    await wait(200);
+    const cts = runAudit(engine).counts;
+    ok('the page audits clean on every rule',
+      Object.values(cts).reduce((a, b) => a + b, 0) === 0);
+    // the ground circle: right-click on the desk opens the wheel, and
+    // the nested Log It pick writes the quill's line into its scrollback
+    engine.bus.emit('pointerdown', { x: 640, y: 640, button: 2, pointerId: 70, target: null, native: null });
+    await wait(60);
+    ok('ground: a right-click on the desk opens the wheel',
+      window.__richtext.ground().isOpen === true);
+    const lines0 = quill.log.entries.length;
+    window.__richtext.ground()._setIndex(0, false); // Quill
+    window.__richtext.ground().onActivate();
+    await wait(40);
+    window.__richtext.ground()._setIndex(1, false); // Log It
+    window.__richtext.ground().onActivate();
+    await wait(80);
+    ok('ground: the nested Log It pick writes the quill line to the scrollback',
+      window.__richtext.ground().isOpen === false && quill.log.entries.length === lines0 + 1);
+
+    // the test suite on the hooks themselves: a TDZ throw in the scriptorium paint or a
+    // disposed-texture warning used to title PASS 6/6 regardless
+    ok('no errors reached the console during the run', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `RICHTEXT ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+} else {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'RICHTEXT READY';
+  }, 1000);
+}
+</script>
+</body>
+</html>
