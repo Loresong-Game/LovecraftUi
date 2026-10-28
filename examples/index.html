@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Examples</title>
+<!-- @demo   The hub: links and a one-line purpose for every example page.
+     @shows  none
+     @params ?assert=1 — the link-truth suite fetches every href and titles its own PASS count -->
+
+<!-- The example hub: every page, one line each. Plain HTML on purpose — this page
+     boots no engine, so it can never mask a library fault. : the muted tone was
+     the critique-named #5f7568-on-#04060a; it now reads at the body copy's own
+     contrast. ?assert=1 proves every link resolves — a hub with dead links is
+     worse than no hub. -->
+<style>
+  html,body{margin:0;padding:0;background:#04060a;color:#b7c0b6;font:14px/1.7 'Segoe UI',sans-serif}
+  main{max-width:760px;margin:60px auto;padding:0 24px}
+  h1{font:small-caps 600 26px Georgia,serif;letter-spacing:2px;color:#6fd18b}
+  h2{font:small-caps 600 16px Georgia,serif;letter-spacing:1px;color:#9ab5a0;margin-top:28px}
+  a{color:#6fd18b;text-decoration:none}
+  a:hover{text-decoration:underline}
+  li{margin:6px 0}
+  .muted{color:#8fa596}
+</style>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+</head>
+<body>
+<main>
+  <h1>LovecraftUI Examples</h1>
+  <p class="muted">Serve this folder over HTTP (ES modules do not load from <code>file://</code>).</p>
+
+  <h2>Showcases</h2>
+  <ul>
+    <li><a href="game-hud.html">game-hud.html</a> — the 1.0 flagship: a complete combat HUD, fought in a drowned hall of cyclopean masonry with the tide on its floor.</li>
+    <li><a href="demo.html">demo.html</a> — the full interactive showcase: every widget, window, and system.</li>
+    <li><a href="embed.html">embed.html</a> — the interface inside a real scrolling page, over a consumer's own canvas, with destroy/reboot.</li>
+    <li><a href="settings.html">settings.html</a> — a real settings screen: tabs, keybinds with conflicts, apply/revert, persistence.</li>
+    <li><a href="inventory.html">inventory.html</a> — item grids and the stacking drag protocol (merge, swap, split, seal).</li>
+    <li><a href="trees.html">trees.html</a> — lattices of fate: twenty-two rites in three bloodlines, read as tiers, as ages, and as an unbound chart.</li>
+    <li><a href="rich-text.html">rich-text.html</a> — the markup sampler: styled runs, inline icons, a live editor, non-Latin torture strings.</li>
+    <li><a href="juice.html">juice.html</a> — choreography and echoes: transition gallery, stagger playground, the sound map, notify routing.</li>
+    <li><a href="binding.html">binding.html</a> — the developer's bench: a fake model driving the HUD both ways, a DevPanel, a dev console that writes the same store, the node inspector, layout persistence.</li>
+    <li><a href="big-data.html">big-data.html</a> — ten thousand things: a log firehose, a 5k-row sorting table, a focusable 10k list.</li>
+    <li><a href="meters.html">meters.html</a> — meters &amp; measures: a wall of live instruments on one fake ticker.</li>
+    <li><a href="meta-screens.html">meta-screens.html</a> — thresholds: title menu, saves, difficulty, pause, level select, credits — end to end.</li>
+    <li><a href="tutorial.html">tutorial.html</a> — the guiding hand: a tour that walks you through binding a ward at a lamplit bench, reagents and all.</li>
+    <li><a href="theme-gallery.html">theme-gallery.html</a> — many skins: the shipped presets at four couch-distance scales, raw token overrides layered on top, a token diff, and photo mode.</li>
+    <li><a href="strategy-hud.html">strategy-hud.html</a> — the war table: a drowned coast you command — marquee the thralls, right-click to send them, hold the bell when the tide answers.</li>
+    <li><a href="survival-hud.html">survival-hud.html</a> — the long winter: a camp where the day actually turns and warmth drains faster after dark.</li>
+    <li><a href="mud-hud.html">mud-hud.html</a> — the speaking stones: clickable room prose in a pinned scrollback, a command line, the wounded body doll, typed ring/amulet fittings.</li>
+    <li><a href="narrative.html">narrative.html</a> — the whispering stage: a staged landfall, letterboxed dialogue on a typewriter, a timed choice that leaves a real obligation, and a sanity slider that makes the interface tremble.</li>
+    <li><a href="action-hud.html">action-hud.html</a> — the lantern bearer: a quay at night, a weapon wheel whose hit area is the ring, a boss walking its phases, and landmarks that leave the frame and come back.</li>
+    <li><a href="deckbuilder.html">deckbuilder.html</a> — the drawn hand: a real one-fight loop — cards dealt flying, intents that telegraph and resolve, a reward pick, and the run map climbing floor by floor.</li>
+    <li><a href="shooter-hud.html">shooter-hud.html</a> — the iron sights: mouse-panned aim over a harbor night, shots that raycast from the reticle, a killfeed, and a capture point you hold.</li>
+    <li><a href="social-hud.html">social-hud.html</a> — the guildhall: a rankable guild roster, channel-voiced guild chat, party unit frames with a ready check, and the ground wheel.</li>
+    <li><a href="tycoon.html">tycoon.html</a> — the counting house: a profit line that survives losses, a five-thousand-row ledger that expands and sorts, and an advisor center you can jump from.</li>
+    <li><a href="arcade.html">arcade.html</a> — a real match-three: matches slide and lock before they clear, cascades multiply, against a moves budget and a clock, ending in the counting-number tally with its rank seal.</li>
+    <li><a href="icon-browser.html">icon-browser.html</a> — the Icon Vault: all 3,840 pack icons, searchable, with copy-ready ids — and register your own painters beside them.</li>
+  </ul>
+
+  <p class="muted">Add <code>?debug=1</code> to any engine page for the overlay: layout bounds,
+  hit chain, clip rects, and the perf HUD.</p>
+</main>
+<script>
+if (new URLSearchParams(location.search).has('assert')) {
+  // the link-truth suite: every href on the hub must resolve (HEAD 200)
+  (async () => {
+    const links = [...document.querySelectorAll('main a[href]')];
+    const results = [];
+    let fails = 0;
+    for (const a of links) {
+      let okay = false;
+      try {
+        const r = await fetch(a.getAttribute('href'), { method: 'HEAD' });
+        okay = r.ok;
+      } catch { okay = false; }
+      results.push(`${okay ? 'PASS' : 'FAIL'} ${a.getAttribute('href')}`);
+      if (!okay) fails++;
+    }
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;right:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.9);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;max-height:90vh;overflow:auto;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `INDEX ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+} else {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'INDEX READY';
+  }, 300);
+}
+</script>
+</body>
+</html>

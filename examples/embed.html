@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LovecraftUI — Embedded</title>
+<!-- @demo   The interface as a good citizen inside a real game site: a framed stage over the host's own canvas, host-owned destroy/boot, and the page keeps its scroll.
+     @shows  EldWindow, Button, EldTooltip, EventLog, EldEvents, VBox, RadialMenu
+     @params ?freeze=1 — bit-stable snapshot boot (static underlay, seeded log) · ?assert=1 — the scripted acceptance suite titles its own PASS count -->
+
+<!--
+  The embeddability acceptance test (/ +; — the design requirement): LovecraftUI living
+  inside a consumer's REAL page — a game site that scrolls, with the site's own animated
+  2D canvas running underneath the interface, and destroy/reboot controls that belong to
+  the HOST (plain DOM buttons — deliberately outside the library).
+
+  Manual acceptance list (drive these by hand; ?assert=1 runs the scripted versions):
+    1. Wheel over the page body — the PAGE scrolls, the UI does not eat it.
+    2. Wheel over the window's scrolling content — the UI consumes it; the page holds still.
+    3. Scroll the page, then click the button — hits stay accurate after the canvas moved.
+    4. Click "Unmake" then "Call it back" — the interface tears down and returns clean
+       while the site's own canvas keeps painting.
+-->
+<style>
+  html,body{margin:0;padding:0;background:#04060a;color:#8fa596;font:13px 'Segoe UI',sans-serif}
+  body{height:2400px} /* tall on purpose: the host page must scroll */
+  .site{width:960px;margin:36px auto 0;padding:0 4px}
+  .site h1{margin:0;font:600 26px Georgia,serif;color:#a8d8b8;letter-spacing:6px}
+  .site .tagline{margin:6px 0 0;color:#6f8a78;font-size:12px;letter-spacing:2px;text-transform:uppercase}
+  .site hr{border:0;border-top:1px solid #1b2a20;margin:18px 0 0}
+  #chrome{width:960px;margin:16px auto 10px;display:flex;gap:10px;align-items:center}
+  #chrome button{background:#12291b;color:#9fe0b4;border:1px solid #2e5238;border-radius:2px;
+    padding:7px 18px;cursor:pointer;font:600 12px 'Segoe UI',sans-serif;letter-spacing:1px;text-transform:uppercase}
+  #chrome button:hover{background:#1b3a26;border-color:#498158}
+  #chrome button:active{background:#0d1f14;transform:translateY(1px)}
+  #chrome .who{margin-left:auto;color:#6f8a78;font-size:11px;letter-spacing:1px;text-transform:uppercase}
+  #stage{position:relative;width:960px;height:600px;margin:0 auto;
+    border:1px solid #2e5238;box-shadow:0 0 0 1px #0d1a12, 0 12px 40px rgba(0,0,0,0.6);border-radius:2px}
+  #under{position:absolute;inset:0;z-index:0} /* the site's own canvas, beneath the interface */
+  /* the host stacks its embed: an absolutely-positioned underlay paints ABOVE an
+     in-flow sibling, so the interface canvas must be lifted — this page shipped
+     for eleven minors with its interface INVISIBLE behind the water (the design requirement) */
+  #stage canvas[data-engine]{position:absolute;inset:0;z-index:1}
+  .copy{width:960px;margin:22px auto;line-height:1.7;color:#8fa596}
+  .copy h2{font:600 15px Georgia,serif;color:#a8d8b8;letter-spacing:2px;margin:0 0 6px}
+  .copy p{margin:0 0 12px}
+</style>
+<script type="importmap">{ "imports": { "three": "../vendor/three.module.js" } }</script>
+</head>
+<body>
+<script>
+window.__errs = [];
+window.addEventListener('error', (e) => { window.__errs.push(e.message); document.title = 'ERROR@' + String(e.message).slice(0, 80); });
+window.addEventListener('unhandledrejection', (e) => { window.__errs.push(String(e.reason)); document.title = 'ERROR@' + String(e.reason).slice(0, 80); });
+const __consoleError = console.error.bind(console);
+console.error = (...a) => { window.__errs.push(a.join(' ')); __consoleError(...a); };
+</script>
+
+<header class="site">
+  <h1>THE DROWNED DEPTHS</h1>
+  <p class="tagline">A game that lives on its own page — the interface is a guest here</p>
+  <hr>
+</header>
+<div id="chrome">
+  <button id="btnDestroy">Unmake</button>
+  <button id="btnBoot">Call it back</button>
+  <span class="who">Host controls — plain DOM, outside the library</span>
+</div>
+<div id="stage"><canvas id="under" width="960" height="600"></canvas></div>
+<div class="copy">
+  <h2>THE STAGE ABOVE</h2>
+  <p>The framed panel is the game's viewport: the site's own canvas paints the water,
+  and the interface boots into the same element as a guest. The page around it keeps
+  every native behavior — it scrolls, it selects, it owns the wheel everywhere the
+  interface has no scrolling surface of its own.</p>
+  <p>Unmake tears the interface down; Call it back reboots it. The water never stops
+  painting either way — the host page answers to nobody.</p>
+</div>
+
+<script type="module">
+import { Eldritch, EldWindow, Button, EldTooltip, EldEvents, EventLog, VBox, RadialMenu, runAudit } from '../src/lovecraft-ui.js';
+
+const params = new URLSearchParams(location.search);
+const FROZEN = params.has('freeze');
+const ASSERT = params.has('assert');
+
+// The site's own render loop: a drifting abyssal gradient on a plain 2D canvas.
+// It keeps animating no matter what the interface does — including across
+// destroy/boot. FROZEN paints ONE static frame: a bit-stable baseline cannot
+// ride a host animation.
+const under = document.getElementById('under');
+const uctx = under.getContext('2d');
+let t = 0;
+(function paint() {
+  const g = uctx.createLinearGradient(0, 0, 0, 600);
+  g.addColorStop(0, '#050a08');
+  g.addColorStop(0.5 + 0.3 * Math.sin(t), '#0b2418');
+  g.addColorStop(1, '#04060a');
+  uctx.fillStyle = g;
+  uctx.fillRect(0, 0, 960, 600);
+  uctx.fillStyle = 'rgba(111,209,139,0.25)';
+  for (let i = 0; i < 40; i++) {
+    const x = (i * 137 + t * 40) % 960;
+    uctx.fillRect(x, (i * 89 + t * 15) % 600, 2, 2);
+  }
+  if (FROZEN) return;
+  t += 0.01;
+  // rAF never fires under headless dump-dom (the test suite's clock) — the suite rides
+  // a timer so the "water keeps painting" acceptance stays provable there
+  if (ASSERT) setTimeout(paint, 16); else requestAnimationFrame(paint);
+})();
+
+// Boot the interface INTO the stage element, over the site's canvas: no abyss
+// background, no vignette — the host page owns the atmosphere here.
+const stage = document.getElementById('stage');
+let win = null;
+let api = null;
+function boot() {
+  Eldritch.init({
+    container: stage, width: 960, height: 600, background: false, vignette: false,
+    transparent: true, // the guest keeps an alpha channel: the site's water shows through
+    // A guest NEVER takes the host's keyboard at boot: fullscreen pages
+    // default bootFocus on so Enter-to-chat works before the first click; on a page
+    // this library does not own, the host decides who holds focus. The suite
+    // asserts the guest kept its hands off.
+    bootFocus: false,
+    // ...and a guest never takes the host's MENU either: the suppression
+    // is CANVAS-scoped by construction, so right-click inside the stage belongs
+    // to the ground circle while the host page around it keeps its native menu —
+    // the citizenship pair, and the suite proves both directions.
+    contextMenu: false,
+    ...(FROZEN || ASSERT ? { timerDriven: true } : {}),
+  });
+  win = EldWindow.create({
+    title: 'Ledger in Exile', x: 60, y: 60,
+    content: (c) => {
+      const b = new Button('Inscribe a Record', { onClick: () => EldEvents.log('The page accepts the ink.') });
+      b.name = 'embed-button';
+      EldTooltip.attach(b, { title: 'The Ledger', desc: 'Every record outlives its writer.' });
+      const log = new EventLog({ width: 340, height: 180 });
+      const root = new VBox({ padding: 6, gap: 8 });
+      root.add(b, log);
+      c.add(root);
+      // FROZEN seeds fixed lines — live EldEvents lines carry wall-clock stamps
+      if (FROZEN) {
+        for (let i = 0; i < 14; i++) log.append('[--:--:--]', 'EVENT', 'Entry ' + i + ' — the tide returns.');
+      } else {
+        for (let i = 0; i < 14; i++) EldEvents.log('Entry ' + i + ' — the tide returns.');
+      }
+      // the ground circle: right-click on the guest's OWN stage opens it
+      const ground = new RadialMenu({
+ ground: true, //: the radial chain's terminus — an unconsumed right-click lands here
+ rOut: 90, rIn: 36, // a modest ring for a 960x600 guest
+ items: [
+ { id: 'ledger', label: 'Ledger', children: [
+ { id: 'inscribe', label: 'Inscribe' },
+ { id: 'clear', label: 'Clear' },
+ ] },
+ ],
+ });
+      ground.on('select', ({ id, path }) => {
+        if (path[0] !== 'ledger') return;
+        if (id === 'inscribe') b.dispatch('click', {});
+        else log.clear();
+      });
+      Eldritch.engine.bus.on('pointerdown', (e) => {
+        if (e.button !== 2 || e.target) return;
+        ground.toggle(e.x, e.y);
+      });
+      api = { button: b, log, ground };
+    },
+  });
+}
+boot();
+document.getElementById('btnDestroy').addEventListener('click', () => { Eldritch.destroy(); win = null; api = null; });
+document.getElementById('btnBoot').addEventListener('click', () => { if (!Eldritch.engine) boot(); });
+
+// ---- scripted acceptance (?assert=1): the manual list, driven — plus the
+// destroy/boot round-trip that used to be hand-only ----
+if (ASSERT) {
+  const results = [];
+  let fails = 0;
+  const ok = (name, cond) => { results.push(`${cond ? 'PASS' : 'FAIL'} ${name}`); if (!cond) fails++; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    await wait(700);
+    const engine = Eldritch.engine;
+    const canvas = engine.canvas;
+    // bootFocus: a guest must not decide who holds the host's keyboard.
+    // Fullscreen pages default the boot focus ON; this page passes bootFocus:false
+    // and here is the proof it kept its hands off — BEFORE anything below touches
+    // focus. (The hidden text input also carries tabindex=-1 now: an invisible
+    // input must never be a host tab stop.)
+    ok('the guest never steals the host\'s focus at boot',
+      document.activeElement !== canvas && document.activeElement !== engine.input.hiddenInput);
+    // The mandate-11 stacking regression, finally read by an instrument: the host's
+    // absolutely-positioned water paints ABOVE an in-flow sibling, so the guest
+    // canvas shipped INVISIBLE behind it for eleven minors. The lift lives in one
+    // CSS rule (#stage canvas[data-engine]) that nothing else reads — delete the
+    // rule and every behavioral assert here stays green over a blank stage. The
+    // computed style is the property that rule exists to guarantee.
+    const ccs = getComputedStyle(canvas);
+    ok('the guest canvas stacks above the host water (absolute, z-index >= 1)',
+      ccs.position === 'absolute' && parseInt(ccs.zIndex, 10) >= 1);
+    // scroll the page, let the pointer-rect refresh land
+    window.scrollTo(0, 200);
+    await wait(120);
+    const rect = canvas.getBoundingClientRect();
+    const btn = api.button;
+    let clicks = 0;
+    btn.on('click', () => clicks++);
+    const cx = rect.left + btn.worldX + btn.w / 2;
+    const cy = rect.top + btn.worldY + btn.h / 2;
+    const pe = (type, buttons) => canvas.dispatchEvent(new PointerEvent(type, {
+      clientX: cx, clientY: cy, button: 0, buttons, pointerId: 1, bubbles: true, isPrimary: true }));
+    pe('pointerdown', 1);
+    await wait(60);
+    pe('pointerup', 0);
+    await wait(60);
+    ok('hits stay accurate after the page scrolled', clicks === 1);
+    // wheel over the window's scrolling content: consumed. UPWARD — the log boots
+    // PINNED to its bottom, and an exhausted direction releases to the
+    // page (the page owns the wheel wherever the interface cannot move); wheeling
+    // up moves the log, which is what "consumed over scrolling content" pins.
+    const logNode = api.log;
+    const wc = new WheelEvent('wheel', {
+      clientX: rect.left + logNode.worldX + 100, clientY: rect.top + logNode.worldY + 60,
+      deltaY: -40, bubbles: true, cancelable: true });
+    canvas.dispatchEvent(wc);
+    ok('wheel over scrolling content is consumed', wc.defaultPrevented === true);
+    // wheel over dead engine space (no scroll area): bubbles, the page keeps it
+    const wd = new WheelEvent('wheel', {
+      clientX: rect.left + 900, clientY: rect.top + 560,
+      deltaY: 40, bubbles: true, cancelable: true });
+    canvas.dispatchEvent(wd);
+    ok('wheel over dead space bubbles to the page', wd.defaultPrevented === false);
+
+    // destroy: the interface unmakes itself; the site's canvas keeps painting
+    const t0 = t;
+    document.getElementById('btnDestroy').click();
+    await wait(250);
+    ok('unmake tears the interface down and the water keeps painting',
+      !Eldritch.engine && stage.querySelector('canvas[data-engine]') == null && t > t0);
+
+    // boot: the interface returns clean into the same stage
+    document.getElementById('btnBoot').click();
+    await wait(400);
+    ok('call-it-back reboots the interface clean',
+      Eldritch.engine != null && EldWindow.windows.length === 1 && api != null && api.button.disposed === false);
+
+    // the guest canvas really is transparent: context alpha + clear alpha 0
+    const gl = Eldritch.engine.renderer;
+    ok('the guest canvas keeps its alpha channel',
+      gl.getContext().getContextAttributes().alpha === true && gl.getClearAlpha() === 0);
+
+    await wait(200);
+    // every rule, not a hand-list: a five-name sum silently exempts whatever rule
+    // lands next (reach, the sixth, was invisible to it)
+    const cts = runAudit(Eldritch.engine).counts;
+    ok('the rebooted page audits clean on every rule',
+      Object.values(cts).reduce((a, b) => a + b, 0) === 0);
+
+    // the ground circle + the CITIZENSHIP PAIR: suppression is
+    // CANVAS-scoped, so the guest's stage owns its right-click while the host
+    // document around it keeps its native menu — both directions proven
+    {
+      const eng2 = Eldritch.engine;
+      const cmIn = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+      eng2.canvas.dispatchEvent(cmIn);
+      ok('the guest canvas suppresses ITS OWN native menu (contextMenu:false)',
+        cmIn.defaultPrevented === true);
+      const cmOut = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+      document.getElementById('btnDestroy').dispatchEvent(cmOut);
+      ok('the HOST document outside the stage keeps its native menu',
+        cmOut.defaultPrevented === false);
+      eng2.bus.emit('pointerdown', { x: 480, y: 300, button: 2, pointerId: 73, target: null, native: null });
+      await wait(60);
+      ok('ground: a right-click inside the stage opens the guest\'s wheel',
+        api.ground.isOpen === true);
+      api.ground.close({ silent: true });
+      await wait(40);
+    }
+
+    // the boot-health hooks are part of the contract: a suite that went green while
+    // an error rode the title would be measuring the wrong thing
+    ok('the page runs error-free end to end', window.__errs.length === 0);
+
+    const pre = document.createElement('pre');
+    pre.id = 'results';
+    pre.style.cssText = 'position:fixed;left:8px;top:8px;color:#8fe8a8;background:rgba(0,0,0,0.85);padding:8px;font:11px Consolas,monospace;z-index:100;margin:0;';
+    pre.textContent = results.join('\n');
+    document.body.appendChild(pre);
+    document.title = `EMBED ASSERT ${fails === 0 ? 'PASS' : 'FAIL'} ${results.length - fails}/${results.length}`;
+  })();
+} else {
+  setTimeout(() => {
+    document.title = window.__errs.length
+      ? 'FAIL ' + String(window.__errs[0]).slice(0, 80)
+      : 'EMBED READY';
+  }, 1000);
+}
+</script>
+</body>
+</html>
